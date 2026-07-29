@@ -1,0 +1,16 @@
+# Board-specific defaults for the LilyGO TTGO T10 V2.0 (ESP32).
+# These are applied automatically on the first build; edit with `make menuconfig`.
+
+CONFIG_IDF_TARGET="esp32"
+
+# 4 MB flash, DIO mode (matches the factory Arduino settings for this board)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+
+# The T10/TS boards do NOT have usable PSRAM -> leave SPIRAM disabled (default).
+
+# A little extra stack for app_main (display + wifi work happens here).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# Serial console @ 115200 (what `make monitor` expects).
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
