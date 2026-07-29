@@ -5,3 +5,12 @@ managed_components/
 dependencies.lock
 .cache/
 compile_commands.json
+
+# Boot splash is per-user content: never commit either the source PNG or the
+# generated header. The build regenerates main/boot_image.h every time (from
+# boot_image.png if present, else the built-in default splash).
+boot_image.png
+main/boot_image.h
+
+# uv venv used for the image conversion (recreated by `make`).
+.venv/

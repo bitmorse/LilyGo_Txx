@@ -11,8 +11,9 @@ What it does once flashed:
 - Graphics on the TFT
 - A tiny 3-button menu:
   - **BTN1** (GPIO35) → WiFi scan, results shown on screen + serial
-  - **BTN2** (GPIO34) → color / graphics demo
-  - **BTN3** (GPIO39) → board info (chip revision, cores, free heap, MAC)
+  - **BTN2** (GPIO34) → live **MPU9250 sensor** readout (accel / gyro / temp /
+    magnetometer), updating on screen until you press a key
+  - **BTN3** (GPIO39) → board info (chip, flash, RAM/heap, MAC)
 
   > Note: this unit wires the buttons to GPIO **35 / 34 / 39** — the LilyGO repo's
   > Arduino header claims 36/37/39, which is wrong for this board revision.
@@ -85,24 +86,33 @@ T10_V20_1C8_ESP-IDF/
     ├── boot_image.h       # 128x160 boot splash (RGB565)
     ├── sound.c/.h         # speaker melody (GPIO25, LEDC)
     ├── buttons.c/.h       # GPIO 35/34/39 (active-low)
+    ├── i2c_bus.c/.h       # shared I2C master bus (SDA21/SCL22)
+    ├── imu.c/.h           # MPU9250 accel/gyro/temp + AK8963 mag
     ├── wifi_scan.c/.h     # station-mode scan
     └── power.c/.h         # optional IP5306 keep-on (battery)
 ```
 
 ## Boot image
 
-On boot the firmware draws `main/boot_image.h` full-screen and waits for any
-button press before continuing to the menu. A default splash ships in the repo.
+On boot the firmware draws a full-screen 128x160 image and waits for any button
+press before continuing to the menu.
 
-To use your own picture (resized/cropped to 128x160):
+To use your own splash: **drop a `boot_image.png` (128x160) into this folder** and
+run `make flash`. The build auto-converts it to `main/boot_image.h` (only when the
+PNG changes). The PNG is gitignored; the generated header is committed as a
+default, so the build still works with no PNG present.
 
 ```bash
-pip install pillow
-python3 tools/img2c.py my_photo.png     # regenerates main/boot_image.h
-make flash
+pip install pillow                 # one-time, needed for the conversion
+cp ~/my_splash.png boot_image.png  # 128x160
+make flash                         # converts + flashes
 ```
 
-`img2c.py` options: `--fit cover|contain` (crop vs letterbox), `--rotate 90`.
+Manual conversion (e.g. non-128x160 source, or letterbox instead of crop):
+
+```bash
+python3 tools/img2c.py my_photo.png --fit contain --rotate 90
+```
 
 ## Boot melody
 

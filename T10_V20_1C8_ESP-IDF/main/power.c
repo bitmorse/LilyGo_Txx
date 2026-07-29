@@ -1,4 +1,5 @@
 #include "power.h"
+#include "i2c_bus.h"
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
@@ -6,25 +7,15 @@
 static const char *TAG = "power";
 
 // IP5306 on the shared I2C bus (SDA=21, SCL=22).
-#define I2C_SDA          21
-#define I2C_SCL          22
 #define IP5306_ADDR      0x75
 #define IP5306_SYS_CTL0  0x00
 #define IP5306_KEEP_ON   0x37   // bit1 set = boost keep-on
 
 void power_init(void)
 {
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = I2C_NUM_0,
-        .sda_io_num = I2C_SDA,
-        .scl_io_num = I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    i2c_master_bus_handle_t bus;
-    if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) {
-        ESP_LOGW(TAG, "i2c bus init failed; skipping IP5306 setup");
+    i2c_master_bus_handle_t bus = i2c_bus_get();
+    if (bus == NULL) {
+        ESP_LOGW(TAG, "no i2c bus; skipping IP5306 setup");
         return;
     }
 
