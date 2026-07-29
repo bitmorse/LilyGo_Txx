@@ -6,7 +6,9 @@ terminal with `make`.
 
 What it does once flashed:
 
-- Boot splash + graphics on the TFT
+- **Boot image** shown full-screen on the TFT, held until you press any button,
+  with a **cute chiptune melody** played through the speaker on boot
+- Graphics on the TFT
 - A tiny 3-button menu:
   - **BTN1** (GPIO35) → WiFi scan, results shown on screen + serial
   - **BTN2** (GPIO34) → color / graphics demo
@@ -74,15 +76,45 @@ T10_V20_1C8_ESP-IDF/
 ├── CMakeLists.txt         # top-level ESP-IDF project
 ├── sdkconfig.defaults     # esp32, 4MB flash, DIO, PSRAM off
 ├── tools/
-│   └── install-esp-idf.sh # what `make setup` runs
+│   ├── install-esp-idf.sh # what `make setup` runs
+│   └── img2c.py           # convert an image -> main/boot_image.h
 └── main/
     ├── app_main.c         # boot, menu loop, heartbeat
     ├── st7735.c/.h        # hand-written ST7735 SPI driver
     ├── font5x7.h          # built-in 5x7 ASCII font
-    ├── buttons.c/.h       # GPIO 36/37/39 (active-low)
+    ├── boot_image.h       # 128x160 boot splash (RGB565)
+    ├── sound.c/.h         # speaker melody (GPIO25, LEDC)
+    ├── buttons.c/.h       # GPIO 35/34/39 (active-low)
     ├── wifi_scan.c/.h     # station-mode scan
     └── power.c/.h         # optional IP5306 keep-on (battery)
 ```
+
+## Boot image
+
+On boot the firmware draws `main/boot_image.h` full-screen and waits for any
+button press before continuing to the menu. A default splash ships in the repo.
+
+To use your own picture (resized/cropped to 128x160):
+
+```bash
+pip install pillow
+python3 tools/img2c.py my_photo.png     # regenerates main/boot_image.h
+make flash
+```
+
+`img2c.py` options: `--fit cover|contain` (crop vs letterbox), `--rotate 90`.
+
+## Boot melody
+
+A short chiptune plays through the speaker (GPIO25) on boot, via the LEDC PWM
+peripheral — see `main/sound.c`. Edit the `notes[]` / `durs[]` arrays in
+`sound_play_boot_melody()` to change the tune.
+
+> Want a real **WAV** file instead of tones? GPIO25 is a DAC pin, so PCM
+> playback is possible (a `wav2c.py` + DAC player). It costs flash (~8 KB per
+> second at 8 kHz) and needs a short source clip. Ask if you want it added.
+> **MP3** is intentionally not supported — it needs a heavyweight decoder that
+> isn't worth it for a boot chime.
 
 ## Tuning the display
 

@@ -32,6 +32,10 @@ void st7735_fill_screen(uint16_t color);
 void st7735_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
 void st7735_draw_pixel(int16_t x, int16_t y, uint16_t color);
 
+// Blit a w*h RGB565 image. `data` is big-endian byte pairs (hi,lo per pixel),
+// typically a const array in flash (see tools/img2c.py / boot_image.h).
+void st7735_draw_image(int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t *data);
+
 // Text using the built-in 5x7 font. `size` scales the glyph (1 = 6x8 cell).
 void st7735_draw_char(int16_t x, int16_t y, char c, uint16_t color, uint16_t bg, uint8_t size);
 void st7735_draw_string(int16_t x, int16_t y, const char *s, uint16_t color, uint16_t bg, uint8_t size);

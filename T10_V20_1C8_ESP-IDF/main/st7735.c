@@ -165,6 +165,24 @@ void st7735_fill_screen(uint16_t color)
     st7735_fill_rect(0, 0, ST7735_WIDTH, ST7735_HEIGHT, color);
 }
 
+void st7735_draw_image(int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t *data)
+{
+    if (w <= 0 || h <= 0) return;
+    set_window(x, y, x + w - 1, y + h - 1);
+
+    // The image usually lives in flash, which SPI DMA can't read directly, so
+    // copy it through the RAM fill buffer in chunks.
+    int total = (int)w * (int)h * 2;   // bytes
+    int off = 0;
+    while (total > 0) {
+        int chunk = total < (int)sizeof(s_fillbuf) ? total : (int)sizeof(s_fillbuf);
+        memcpy(s_fillbuf, data + off, chunk);
+        spi_send(s_fillbuf, chunk, 1);
+        off += chunk;
+        total -= chunk;
+    }
+}
+
 void st7735_draw_pixel(int16_t x, int16_t y, uint16_t color)
 {
     if (x < 0 || y < 0 || x >= ST7735_WIDTH || y >= ST7735_HEIGHT) return;

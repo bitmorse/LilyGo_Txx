@@ -23,6 +23,8 @@
 #include "buttons.h"
 #include "wifi_scan.h"
 #include "power.h"
+#include "sound.h"
+#include "boot_image.h"
 
 static const char *TAG = "app";
 
@@ -166,13 +168,19 @@ void app_main(void)
     power_init();          // best-effort IP5306 keep-on (battery use)
     st7735_init();
     buttons_init();
+    sound_init();
     wifi_scan_init();
 
-    // Boot splash.
-    st7735_fill_screen(ST_BLACK);
-    st7735_draw_string(10, 60, "T10 V2.0",     ST_WHITE, ST_BLACK, 2);
-    st7735_draw_string(16, 84, "1.8 ST7735",   ST_CYAN,  ST_BLACK, 1);
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    // Boot splash image + cute melody; hold the image until a button is pressed.
+    st7735_draw_image(0, 0, BOOT_IMAGE_W, BOOT_IMAGE_H, boot_image);
+    st7735_fill_rect(0, 144, ST7735_WIDTH, 12, ST_BLACK);
+    st7735_draw_string(20, 146, "press any key", ST_WHITE, ST_BLACK, 1);
+    sound_play_boot_melody();
+
+    buttons_poll();                                   // clear any stale edge
+    while (buttons_poll() == 0) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
 
     screen_home();
 
