@@ -22,7 +22,7 @@ static uint32_t rd_u32(const uint8_t *p)
 }
 static uint16_t rd_u16(const uint8_t *p) { return p[0] | (p[1] << 8); }
 
-// Produce a small MCAP into a heap buffer. Caller frees *buf.
+// Produce a small single-channel MCAP into a heap buffer. Caller frees *buf.
 static size_t make_file(uint8_t **buf)
 {
     char   *mem = NULL;
@@ -31,11 +31,13 @@ static size_t make_file(uint8_t **buf)
     uint8_t schema[3] = { 0xAA, 0xBB, 0xCC };
 
     mcap_writer_t w;
-    CHECK(mcap_open(&w, f, "/accel", "protobuf", "vibration.AccelBatch",
-                    "protobuf", schema, sizeof(schema)));
+    CHECK(mcap_begin(&w, f));
+    CHECK(mcap_add_schema(&w, 1, "vibration.AccelBatch", "protobuf",
+                          schema, sizeof(schema)));
+    CHECK(mcap_add_channel(&w, 1, 1, "/accel", "protobuf"));
     uint8_t payload[4] = { 1, 2, 3, 4 };
     for (int i = 0; i < 3; i++)
-        CHECK(mcap_write_message(&w, 1000 + i, 1000 + i, payload, sizeof(payload)));
+        CHECK(mcap_write_message(&w, 1, 1000 + i, 1000 + i, payload, sizeof(payload)));
     CHECK(mcap_close(&w));
     fclose(f);
 
@@ -137,6 +139,58 @@ static void test_schema_payload(void)
     free(b);
 }
 
+// Two schemas + two channels, messages interleaved: each channel keeps its own
+// sequence counter and records carry the right channel id.
+static void test_multi_channel(void)
+{
+    char   *mem = NULL;
+    size_t  sz = 0;
+    FILE   *f = open_memstream(&mem, &sz);
+    uint8_t s1[2] = { 0x11, 0x22 }, s2[2] = { 0x33, 0x44 };
+
+    mcap_writer_t w;
+    CHECK(mcap_begin(&w, f));
+    CHECK(mcap_add_schema(&w, 1, "vibration.AccelBatch", "protobuf", s1, 2));
+    CHECK(mcap_add_schema(&w, 2, "vibration.ImuAux", "protobuf", s2, 2));
+    CHECK(mcap_add_channel(&w, 1, 1, "/accel", "protobuf"));
+    CHECK(mcap_add_channel(&w, 2, 2, "/imu", "protobuf"));
+    uint8_t p[2] = { 9, 9 };
+    // /accel gets 3 messages, /imu gets 2, interleaved.
+    CHECK(mcap_write_message(&w, 1, 10, 10, p, 2));
+    CHECK(mcap_write_message(&w, 2, 11, 11, p, 2));
+    CHECK(mcap_write_message(&w, 1, 12, 12, p, 2));
+    CHECK(mcap_write_message(&w, 2, 13, 13, p, 2));
+    CHECK(mcap_write_message(&w, 1, 14, 14, p, 2));
+    CHECK(mcap_close(&w));
+    fclose(f);
+
+    uint8_t *b = (uint8_t *)mem;
+    size_t off = 8, end = sz - 8;
+    int seen[256] = { 0 };
+    int seq_by_chan[3] = { 0, 0, 0 };     // expected next sequence per channel
+    int msgs_chan[3] = { 0, 0, 0 };
+    while (off < end) {
+        uint8_t op = b[off];
+        uint64_t len = rd_u64(b + off + 1);
+        seen[op]++;
+        if (op == 0x05) {
+            uint16_t chan = rd_u16(b + off + 9);
+            uint32_t seq  = rd_u32(b + off + 9 + 2);
+            CHECK(chan == 1 || chan == 2);
+            CHECK_EQ(seq, seq_by_chan[chan]);     // per-channel sequence
+            seq_by_chan[chan]++;
+            msgs_chan[chan]++;
+        }
+        off += 9 + len;
+    }
+    CHECK_EQ(seen[0x03], 2);              // two schemas
+    CHECK_EQ(seen[0x04], 2);              // two channels
+    CHECK_EQ(seen[0x05], 5);             // five messages total
+    CHECK_EQ(msgs_chan[1], 3);
+    CHECK_EQ(msgs_chan[2], 2);
+    free(b);
+}
+
 int main(void)
 {
     printf("test_mcap\n");
@@ -144,5 +198,6 @@ int main(void)
     RUN(test_record_structure);
     RUN(test_header_first);
     RUN(test_schema_payload);
+    RUN(test_multi_channel);
     return REPORT();
 }

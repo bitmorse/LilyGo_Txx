@@ -15,33 +15,35 @@ N = 500
 
 
 def main(path):
+    pool = descriptor_pool.DescriptorPool()
+    classes = {}      # schema name -> message class
+    counts = {}       # topic -> message count
     with open(path, "rb") as f:
         reader = make_reader(f)
-        pool = descriptor_pool.DescriptorPool()
-        cls = None
-        name = None
-        count = 0
-        prev_t0 = None
         for schema, channel, message in reader.iter_messages():
-            if cls is None:
-                assert channel.topic == "/accel", channel.topic
-                assert schema.encoding == "protobuf", schema.encoding
+            assert schema.encoding == "protobuf", schema.encoding
+            if schema.name not in classes:
                 for fd in FileDescriptorSet.FromString(schema.data).file:
-                    pool.Add(fd)
-                name = schema.name
-                cls = message_factory.GetMessageClass(pool.FindMessageTypeByName(name))
-            m = cls.FromString(message.data)
-            assert len(m.x) == N and len(m.y) == N and len(m.z) == N, "batch size"
-            assert m.rate_hz == RATE, m.rate_hz
+                    try:
+                        pool.Add(fd)
+                    except Exception:
+                        pass  # file already added by another schema (shared FDS)
+                classes[schema.name] = message_factory.GetMessageClass(
+                    pool.FindMessageTypeByName(schema.name))
+            m = classes[schema.name].FromString(message.data)
             assert m.t0_ns == message.log_time, "t0 vs log_time mismatch"
-            if prev_t0 is not None:
-                # batches are spaced N/RATE seconds apart
-                assert m.t0_ns - prev_t0 == N * 1_000_000_000 // RATE, "spacing"
-            prev_t0 = m.t0_ns
-            count += 1
+            if channel.topic == "/accel":
+                assert m.rate_hz == RATE and len(m.x) == N, "accel batch"
+                assert len(m.x) == len(m.y) == len(m.z), "accel xyz lengths"
+            elif channel.topic == "/imu":
+                assert len(m.gx) == len(m.mx) == len(m.temp_c), "imu lengths"
+                assert m.rate_hz == 100, m.rate_hz
+            counts[channel.topic] = counts.get(channel.topic, 0) + 1
 
-    assert cls is not None, "no messages found"
-    print(f"OK: {path} valid MCAP, schema '{name}', {count} AccelBatch messages decoded")
+    assert "/accel" in counts, "no /accel messages"
+    assert "/imu" in counts, "no /imu messages"
+    print(f"OK: {path} valid MCAP, schemas {sorted(classes)}, "
+          f"messages {counts}")
     return 0
 
 

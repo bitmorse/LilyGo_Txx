@@ -190,8 +190,11 @@ accelerometer at its **4 kHz / ±16 g** maximum and stream it to the microSD car
 as an **[MCAP](https://mcap.dev)** file you can open in **Foxglove Studio** or crunch
 with numpy. Menu → **Vibration Log** → **Start**; **Stop** flushes and closes the file.
 
-- **Capture:** accel-only, ±16 g, 4 kHz via the MPU9250 **FIFO** (DLPF bypassed,
-  ~1 kHz usable bandwidth). A dedicated 1 MHz I²C handle drains the FIFO.
+- **Capture:** accel ±16 g at 4 kHz via the MPU9250 **FIFO** (DLPF bypassed,
+  ~1 kHz usable bandwidth), on the `/accel` channel. A dedicated 1 MHz I²C handle
+  drains the FIFO. In parallel, gyro + magnetometer + die-temperature are logged
+  on a second `/imu` channel at **100 Hz** (the AK8963 magnetometer's ceiling) —
+  they can't share the 4 kHz FIFO, so they get their own honest rate.
 - **Path:** the sampler task (core 1) pushes raw `int16` samples through a 32 KB
   FreeRTOS StreamBuffer to the writer task (core 0), which batches 500 samples,
   protobuf-encodes an `AccelBatch`, and appends one MCAP message (~8 msgs/s).
@@ -213,17 +216,23 @@ compiled to the embedded descriptor `main/accel_schema.h` by `tools/gen_schema.s
 ### Reading the file
 
 ```proto
-message AccelBatch {                 // one per MCAP message, /accel topic
+message AccelBatch {                 // /accel topic, ~8 msgs/s
   fixed64 t0_ns  = 1;                // UTC ns of the first sample in the batch
   uint32  rate_hz = 2;              // 4000
   repeated float x = 3;             // acceleration in g, one per sample
   repeated float y = 4;
   repeated float z = 5;             // sample n time = t0_ns + n*1e9/rate_hz
 }
+message ImuAux {                     // /imu topic, ~2 msgs/s (100 Hz data)
+  fixed64 t0_ns = 1;  uint32 rate_hz = 2;   // 100
+  repeated float gx = 3, gy = 4, gz = 5;    // gyro, deg/s
+  repeated float mx = 6, my = 7, mz = 8;    // magnetometer, microtesla
+  repeated float temp_c = 9;                // die temperature, deg C
+}
 ```
 
 In **Foxglove Studio**: File → Open local file → `vibNNNN.mcap`; the `/accel`
-topic exposes the decoded `AccelBatch`. For a time-domain waveform or FFT the
+and `/imu` topics expose the decoded `AccelBatch` / `ImuAux`. For a time-domain waveform or FFT the
 batched arrays are best read programmatically — e.g.:
 
 ```python

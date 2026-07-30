@@ -15,3 +15,18 @@ message AccelBatch {
   repeated float y = 4;
   repeated float z = 5;
 }
+
+// A batch of the slow auxiliary IMU channels (gyro + magnetometer + die temp),
+// logged at ~100 Hz (the AK8963 magnetometer's maximum). Same batching/timing
+// convention as AccelBatch. All arrays are the same length.
+message ImuAux {
+  fixed64 t0_ns  = 1;
+  uint32  rate_hz = 2;
+  repeated float gx = 3;      // angular rate, deg/s
+  repeated float gy = 4;
+  repeated float gz = 5;
+  repeated float mx = 6;      // magnetic field, microtesla
+  repeated float my = 7;
+  repeated float mz = 8;
+  repeated float temp_c = 9;  // die temperature, deg C
+}

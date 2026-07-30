@@ -84,6 +84,36 @@ static void test_encode_zero_samples(void)
     CHECK_EQ(out[0], 0x09);
 }
 
+// --- ImuAux (gyro + mag + temp) encoding ---------------------------------
+
+static void test_imuaux_layout(void)
+{
+    float g[2] = { 1.0f, 2.0f }, m[2] = { 3.0f, 4.0f }, tp[2] = { 25.5f, 25.6f };
+    uint8_t out[256];
+    uint32_t len = imuaux_encode_batch(out, sizeof(out), 0x11, 100,
+                                       g, g, g, m, m, m, tp, 2);
+    CHECK(len > 0);
+    CHECK_EQ(out[0], 0x09);                 // field 1 t0_ns, fixed64
+    CHECK_EQ(out[9], 0x10);                 // field 2 rate_hz, varint
+    CHECK_EQ(out[10], 0x64);                // 100
+    CHECK_EQ(out[11], 0x1A);                // field 3 gx, len-delimited
+    CHECK_EQ(out[12], 0x08);                // 2 floats = 8 bytes
+    CHECK_EQ(out[21], 0x22);                // field 4 gy tag after 8 float bytes
+    // exact: 9 (t0) + 2 (rate) + 7*(1+1+8) = 11 + 70 = 81
+    CHECK_EQ(len, 81);
+    CHECK(len <= IMUAUX_MSG_MAXLEN(2));
+    float f;
+    memcpy(&f, &out[13], 4); CHECK(f == 1.0f);   // gx[0]
+}
+
+static void test_imuaux_rejects_small_buffer(void)
+{
+    float a[2] = {0};
+    uint8_t out[16];
+    CHECK_EQ(imuaux_encode_batch(out, sizeof(out), 0, 100,
+                                 a, a, a, a, a, a, a, 2), 0);
+}
+
 int main(void)
 {
     printf("test_accel_encode\n");
@@ -93,5 +123,7 @@ int main(void)
     RUN(test_encode_length_matches_bound);
     RUN(test_encode_rejects_small_buffer);
     RUN(test_encode_zero_samples);
+    RUN(test_imuaux_layout);
+    RUN(test_imuaux_rejects_small_buffer);
     return REPORT();
 }

@@ -19,6 +19,7 @@ static const char *TAG = "imu";
 #define REG_INT_STATUS  0x3A   // bit4 = FIFO_OFLOW_INT
 #define REG_INT_PIN_CFG 0x37
 #define REG_ACCEL_XOUT  0x3B   // 14 bytes: accel(6) temp(2) gyro(6)
+#define REG_TEMP_OUT    0x41   // 8 bytes: temp(2) gyro(6)
 #define REG_USER_CTRL   0x6A   // bit6 FIFO_EN, bit2 FIFO_RST
 #define REG_PWR_MGMT_1  0x6B
 #define REG_PWR_MGMT_2  0x6C   // per-axis stby: bits5-3 accel, bits2-0 gyro
@@ -207,7 +208,7 @@ bool imu_hires_start(void)
 
     wr(dev, REG_PWR_MGMT_1, 0x01);      // wake, best available clock
     vTaskDelay(pdMS_TO_TICKS(5));
-    wr(dev, REG_PWR_MGMT_2, 0x07);      // accel on, gyro off (saves power/bus)
+    wr(dev, REG_PWR_MGMT_2, 0x00);      // accel + gyro on (gyro read on aux chan)
     wr(dev, REG_ACCEL_CFG,  0x18);      // ACCEL_FS_SEL = 3 -> +/-16 g
     wr(dev, REG_ACCEL_CFG2, 0x08);      // A_FCHOICE_B=1: DLPF off -> 4 kHz ODR
     s_hires_lsb_per_g = 2048.0f;        // +/-16 g full-scale
@@ -267,6 +268,39 @@ int imu_hires_read(int16_t *dst, int max_samples, bool *overflow)
         done += chunk;
     }
     return done;
+}
+
+// Read the slow auxiliary channels once (gyro deg/s, mag uT, temp degC) via
+// direct register reads -- NOT the FIFO (the FIFO carries accel only). Safe to
+// call concurrently with imu_hires_read: the shared I2C bus serializes access.
+// Any output pointer may be NULL. Returns false only if no IMU is present.
+bool imu_hires_read_aux(float *gx, float *gy, float *gz,
+                        float *mx, float *my, float *mz, float *temp_c)
+{
+    i2c_master_dev_handle_t dev = s_mpu_fast ? s_mpu_fast : s_mpu;
+    if (dev == NULL) return false;
+
+    uint8_t b[8];                            // TEMP(2) + GYRO(6), contiguous
+    if (rd(dev, REG_TEMP_OUT, b, sizeof(b)) != ESP_OK) return false;
+    if (temp_c) *temp_c = be16(&b[0]) / 333.87f + 21.0f;
+    if (gx) *gx = be16(&b[2]) / GYR_LSB_PER_DPS;   // gyro FS +/-250 dps (default)
+    if (gy) *gy = be16(&b[4]) / GYR_LSB_PER_DPS;
+    if (gz) *gz = be16(&b[6]) / GYR_LSB_PER_DPS;
+
+    // Magnetometer (AK8963), if present. 16-bit mode: 0.15 uT / LSB.
+    float lx = 0, ly = 0, lz = 0;
+    if (s_mag) {
+        uint8_t m[7];                        // HXL..HZH + ST2 (ST2 read unlatches)
+        if (rd(s_mag, MAG_HXL, m, sizeof(m)) == ESP_OK && !(m[6] & 0x08)) {
+            lx = le16(&m[0]) * 0.15f;        // AK8963 is little-endian
+            ly = le16(&m[2]) * 0.15f;
+            lz = le16(&m[4]) * 0.15f;
+        }
+    }
+    if (mx) *mx = lx;
+    if (my) *my = ly;
+    if (mz) *mz = lz;
+    return true;
 }
 
 void imu_hires_stop(void)

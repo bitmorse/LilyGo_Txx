@@ -501,17 +501,17 @@ static void vib_update(lv_timer_t *t)
         const char *f = strrchr(s.path, '/');
         f = f ? f + 1 : s.path;
         snprintf(buf, sizeof(buf),
-                 LV_SYMBOL_AUDIO " REC  %s\n%us   %uk smp\ndrop %u   buf %u%%\n"
-                 "%u KB   clock %s",
+                 LV_SYMBOL_AUDIO " REC  %s\n%us   %uk smp\ndrop %u/%u  buf %u%%\n"
+                 "%u KB   clock %s\naccel + gyro/mag/temp",
                  f, (unsigned)s.elapsed_s, (unsigned)(s.samples / 1000),
-                 (unsigned)s.drops, (unsigned)s.buf_pct,
+                 (unsigned)s.drops, (unsigned)s.aux_drops, (unsigned)s.buf_pct,
                  (unsigned)(s.bytes / 1024), s.time_synced ? "UTC" : "mono");
     } else if (s.err[0]) {
         snprintf(buf, sizeof(buf), "Idle\n\nError:\n%s", s.err);
     } else {
         snprintf(buf, sizeof(buf),
-                 "Idle\n\n4 kHz +/-16g accel\nlogged to SD as\nMCAP. Insert a\n"
-                 "card, press Start.");
+                 "Idle\n\n4kHz accel +/-16g\n+ gyro/mag/temp\n@100Hz, to SD as\n"
+                 "MCAP. Card, Start.");
     }
     lv_label_set_text(s_vib_label, buf);
 

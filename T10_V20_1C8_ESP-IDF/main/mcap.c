@@ -13,9 +13,6 @@
 
 static const uint8_t MCAP_MAGIC[8] = { 0x89, 'M', 'C', 'A', 'P', '0', 0x0D, 0x0A };
 
-#define SCHEMA_ID   1
-#define CHANNEL_ID  1
-
 // --- little-endian primitives (all MCAP integers are LE) --------------------
 
 static void wbytes(mcap_writer_t *w, const void *p, size_t n)
@@ -65,17 +62,11 @@ static void rec_hdr(mcap_writer_t *w, uint8_t op, uint64_t content_len)
 
 // --- public -----------------------------------------------------------------
 
-bool mcap_open(mcap_writer_t *w, FILE *f,
-               const char *topic, const char *msg_encoding,
-               const char *schema_name, const char *schema_encoding,
-               const uint8_t *schema_data, uint32_t schema_len)
+bool mcap_begin(mcap_writer_t *w, FILE *f)
 {
     assert(w != NULL && f != NULL);
-    assert(topic && msg_encoding && schema_name && schema_encoding);
-    assert(schema_data != NULL || schema_len == 0);
-
     w->f = f;
-    w->seq = 0;
+    for (int i = 0; i < MCAP_MAX_CHANNELS; i++) w->seq[i] = 0;
     w->ok = true;
 
     wbytes(w, MCAP_MAGIC, sizeof(MCAP_MAGIC));
@@ -86,36 +77,48 @@ bool mcap_open(mcap_writer_t *w, FILE *f,
     rec_hdr(w, OP_HEADER, str_len(profile) + str_len(library));
     w_str(w, profile);
     w_str(w, library);
-
-    // Schema: id + name + encoding + data (u32 len + bytes).
-    rec_hdr(w, OP_SCHEMA,
-            2 + str_len(schema_name) + str_len(schema_encoding) + 4 + schema_len);
-    w_u16(w, SCHEMA_ID);
-    w_str(w, schema_name);
-    w_str(w, schema_encoding);
-    w_u32(w, schema_len);
-    wbytes(w, schema_data, schema_len);
-
-    // Channel: id + schema_id + topic + message_encoding + metadata(empty map).
-    rec_hdr(w, OP_CHANNEL,
-            2 + 2 + str_len(topic) + str_len(msg_encoding) + 4);
-    w_u16(w, CHANNEL_ID);
-    w_u16(w, SCHEMA_ID);
-    w_str(w, topic);
-    w_str(w, msg_encoding);
-    w_u32(w, 0);                             // metadata map: 0 bytes
-
     return w->ok;
 }
 
-bool mcap_write_message(mcap_writer_t *w, uint64_t log_ns, uint64_t pub_ns,
+bool mcap_add_schema(mcap_writer_t *w, uint16_t id, const char *name,
+                     const char *encoding, const uint8_t *data, uint32_t len)
+{
+    assert(w != NULL && name && encoding && (data != NULL || len == 0));
+    // Schema: id + name + encoding + data (u32 len + bytes).
+    rec_hdr(w, OP_SCHEMA, 2 + str_len(name) + str_len(encoding) + 4 + len);
+    w_u16(w, id);
+    w_str(w, name);
+    w_str(w, encoding);
+    w_u32(w, len);
+    wbytes(w, data, len);
+    return w->ok;
+}
+
+bool mcap_add_channel(mcap_writer_t *w, uint16_t chan_id, uint16_t schema_id,
+                      const char *topic, const char *msg_encoding)
+{
+    assert(w != NULL && topic && msg_encoding);
+    assert(chan_id > 0 && chan_id < MCAP_MAX_CHANNELS);
+    // Channel: id + schema_id + topic + message_encoding + metadata(empty map).
+    rec_hdr(w, OP_CHANNEL, 2 + 2 + str_len(topic) + str_len(msg_encoding) + 4);
+    w_u16(w, chan_id);
+    w_u16(w, schema_id);
+    w_str(w, topic);
+    w_str(w, msg_encoding);
+    w_u32(w, 0);                             // metadata map: 0 bytes
+    return w->ok;
+}
+
+bool mcap_write_message(mcap_writer_t *w, uint16_t chan_id,
+                        uint64_t log_ns, uint64_t pub_ns,
                         const uint8_t *data, uint32_t len)
 {
     assert(w != NULL && (data != NULL || len == 0));
+    assert(chan_id > 0 && chan_id < MCAP_MAX_CHANNELS);
     // Message: channel_id(2) + sequence(4) + log_time(8) + publish_time(8) + data.
     rec_hdr(w, OP_MESSAGE, (uint64_t)22 + len);
-    w_u16(w, CHANNEL_ID);
-    w_u32(w, w->seq++);
+    w_u16(w, chan_id);
+    w_u32(w, w->seq[chan_id]++);
     w_u64(w, log_ns);
     w_u64(w, pub_ns);
     wbytes(w, data, len);

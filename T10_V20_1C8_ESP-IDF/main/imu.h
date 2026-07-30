@@ -32,3 +32,8 @@ bool  imu_hires_start(void);                 // returns false if no IMU present
 int   imu_hires_read(int16_t *dst, int max_samples, bool *overflow);
 void  imu_hires_stop(void);
 float imu_hires_lsb_per_g(void);             // scale: raw / this = g
+
+// Read the slow aux channels once (gyro deg/s, mag uT, temp degC). Direct
+// register read (not the FIFO); safe alongside imu_hires_read. NULLs allowed.
+bool  imu_hires_read_aux(float *gx, float *gy, float *gz,
+                         float *mx, float *my, float *mz, float *temp_c);

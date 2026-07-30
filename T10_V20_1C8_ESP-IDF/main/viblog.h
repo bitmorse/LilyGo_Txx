@@ -14,7 +14,8 @@ typedef struct {
     char     path[40];      // /sdcard/vibNNNN.mcap
     uint32_t rate_hz;       // nominal capture rate (4000)
     uint64_t samples;       // accel samples written to the file
-    uint32_t drops;         // samples lost (FIFO overflow / buffer full)
+    uint32_t drops;         // accel samples lost (FIFO overflow / buffer full)
+    uint32_t aux_drops;     // aux (gyro/mag/temp) samples lost
     uint32_t elapsed_s;     // seconds since start
     uint32_t buf_pct;       // StreamBuffer fill level, 0..100
     uint64_t bytes;         // bytes written to the file

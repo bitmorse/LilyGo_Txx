@@ -14,7 +14,8 @@ out.append('// embedded as the MCAP Schema.data so Foxglove can decode the proto
 out.append('#pragma once')
 out.append('#include <stdint.h>')
 out.append('')
-out.append('#define ACCEL_SCHEMA_NAME "vibration.AccelBatch"')
+out.append('#define ACCEL_SCHEMA_NAME  "vibration.AccelBatch"')
+out.append('#define IMUAUX_SCHEMA_NAME "vibration.ImuAux"')
 out.append('')
 out.append('static const uint8_t accel_schema_fds[] = {')
 line = '    '
