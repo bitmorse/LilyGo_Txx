@@ -10,55 +10,118 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 
-// Persisted-ish settings (in RAM for the demo).
+// Settings state (RAM for the demo).
 static bool s_wifi_on = false;
 static int  s_mode = 0;               // 0=Auto 1=Day 2=Night
 
-static lv_obj_t *s_info;              // shared status/output label
+// Main menu screen + its focusable widgets, so we can restore the encoder group
+// when returning from a sub-page.
+#define MAX_FOCUS 12
+static lv_obj_t *s_main_scr;
+static lv_obj_t *s_focus[MAX_FOCUS];
+static int       s_focus_n;
+static lv_obj_t *s_page;              // current sub-page, or NULL
 
-static void set_info(const char *txt)
+static void group_add_main(lv_obj_t *o)
 {
-    if (s_info) lv_label_set_text(s_info, txt);
+    lv_group_add_obj(lvgl_port_group(), o);
+    if (s_focus_n < MAX_FOCUS) s_focus[s_focus_n++] = o;
 }
 
-// --- widget event handlers --------------------------------------------------
+// --- sub-page (info screen with a Back button) ------------------------------
+
+static void back_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_group_t *g = lvgl_port_group();
+    lv_group_remove_all_objs(g);
+    for (int i = 0; i < s_focus_n; i++) lv_group_add_obj(g, s_focus[i]);
+    if (s_focus_n) lv_group_focus_obj(s_focus[0]);
+
+    lv_screen_load(s_main_scr);
+    if (s_page) { lv_obj_delete_async(s_page); s_page = NULL; }
+}
+
+static void open_page(const char *title, const char *text)
+{
+    lv_group_t *g = lvgl_port_group();
+    lv_group_remove_all_objs(g);
+
+    lv_obj_t *page = lv_obj_create(NULL);
+    s_page = page;
+    lv_obj_set_style_bg_color(page, lv_color_hex(0x101418), 0);
+    lv_obj_set_style_text_color(page, lv_color_hex(0xE6EAEE), 0);
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(page, 4, 0);
+    lv_obj_set_style_pad_row(page, 4, 0);
+
+    lv_obj_t *t = lv_label_create(page);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_color(t, lv_color_hex(0x37C8B4), 0);
+
+    lv_obj_t *c = lv_label_create(page);
+    lv_label_set_long_mode(c, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(c, lv_pct(100));
+    lv_label_set_text(c, text);
+
+    lv_obj_t *b = lv_button_create(page);
+    lv_obj_set_width(b, lv_pct(100));
+    lv_obj_t *bl = lv_label_create(b);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(b, back_cb, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(g, b);
+
+    lv_screen_load(page);
+    lv_group_focus_obj(b);
+}
+
+// --- widget / action handlers -----------------------------------------------
 
 static void wifi_switch_cb(lv_event_t *e)
 {
-    lv_obj_t *sw = lv_event_get_target(e);
-    s_wifi_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    set_info(s_wifi_on ? "WiFi: ON" : "WiFi: OFF");
+    s_wifi_on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
 }
 
 static void backlight_cb(lv_event_t *e)
 {
-    lv_obj_t *sb = lv_event_get_target(e);
-    int v = lv_spinbox_get_value(sb);
-    st7735_set_brightness(v);          // live brightness
+    st7735_set_brightness(lv_spinbox_get_value(lv_event_get_target(e)));
 }
 
 static void mode_cb(lv_event_t *e)
 {
-    lv_obj_t *dd = lv_event_get_target(e);
-    s_mode = lv_dropdown_get_selected(dd);
+    s_mode = lv_dropdown_get_selected(lv_event_get_target(e));
 }
 
 static void wifi_scan_cb(lv_event_t *e)
 {
     (void)e;
-    set_info("Scanning...");
-    lv_refr_now(NULL);                 // paint the message before the blocking scan
-
-    ap_info_t aps[6];
-    int n = wifi_scan_run(aps, 6);
-
+    ap_info_t aps[8];
+    int n = wifi_scan_run(aps, 8);
     char buf[256];
-    int off = snprintf(buf, sizeof(buf), "Found %d:\n", n);
-    for (int i = 0; i < n && off < (int)sizeof(buf) - 24; i++) {
-        off += snprintf(buf + off, sizeof(buf) - off, "%s %ddBm\n",
+    int off = snprintf(buf, sizeof(buf), "%d networks:\n", n);
+    for (int i = 0; i < n && off < (int)sizeof(buf) - 28; i++) {
+        off += snprintf(buf + off, sizeof(buf) - off, "%s  %ddBm\n",
                         aps[i].ssid, aps[i].rssi);
     }
-    set_info(buf);
+    if (n == 0) snprintf(buf, sizeof(buf), "No networks found");
+    open_page("WiFi scan", buf);
+}
+
+static void sensors_cb(lv_event_t *e)
+{
+    (void)e;
+    imu_data_t d;
+    char buf[160];
+    if (!imu_read(&d)) {
+        snprintf(buf, sizeof(buf), "MPU9250 not detected");
+    } else {
+        snprintf(buf, sizeof(buf),
+                 "Accel (mg)\n %d  %d  %d\nGyro (dps)\n %d  %d  %d\nTemp %d C",
+                 (int)(d.ax * 1000), (int)(d.ay * 1000), (int)(d.az * 1000),
+                 (int)d.gx, (int)d.gy, (int)d.gz, (int)d.temp_c);
+    }
+    open_page("Sensors", buf);
 }
 
 static void board_info_cb(lv_event_t *e)
@@ -68,37 +131,21 @@ static void board_info_cb(lv_event_t *e)
     esp_chip_info(&chip);
     uint32_t flash = 0;
     esp_flash_get_size(NULL, &flash);
-
-    char buf[128];
+    char buf[160];
     snprintf(buf, sizeof(buf),
-             "ESP32 rev%d %dc\nFlash %uMB\nHeap %uKB",
+             "ESP32 rev%d\n%d cores\nFlash %uMB\nFree heap %uKB",
              chip.revision, chip.cores, (unsigned)(flash >> 20),
              (unsigned)(esp_get_free_heap_size() / 1024));
-    set_info(buf);
-}
-
-static void sensors_cb(lv_event_t *e)
-{
-    (void)e;
-    imu_data_t d;
-    if (!imu_read(&d)) { set_info("IMU: not found"); return; }
-    char buf[128];
-    snprintf(buf, sizeof(buf),
-             "A %d %d %d mg\nG %d %d %d dps\nT %d C",
-             (int)(d.ax * 1000), (int)(d.ay * 1000), (int)(d.az * 1000),
-             (int)d.gx, (int)d.gy, (int)d.gz, (int)d.temp_c);
-    set_info(buf);
+    open_page("Board info", buf);
 }
 
 static void reboot_cb(lv_event_t *e)
 {
     (void)e;
-    set_info("Rebooting...");
-    lv_refr_now(NULL);
     esp_restart();
 }
 
-// --- builders ---------------------------------------------------------------
+// --- main menu builders -----------------------------------------------------
 
 static lv_obj_t *make_row(lv_obj_t *parent, const char *name)
 {
@@ -114,7 +161,7 @@ static lv_obj_t *make_row(lv_obj_t *parent, const char *name)
     return row;
 }
 
-static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
+static void make_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_width(btn, lv_pct(100));
@@ -122,14 +169,13 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_event_cb_t c
     lv_label_set_text(lbl, text);
     lv_obj_center(lbl);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
-    lv_group_add_obj(lvgl_port_group(), btn);
-    return btn;
+    group_add_main(btn);
 }
 
 void ui_menu_start(void)
 {
-    lv_group_t *g = lvgl_port_group();
-    lv_obj_t *scr = lv_screen_active();
+    s_main_scr = lv_screen_active();
+    lv_obj_t *scr = s_main_scr;
 
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), 0);
     lv_obj_set_style_text_color(scr, lv_color_hex(0xE6EAEE), 0);
@@ -147,9 +193,9 @@ void ui_menu_start(void)
     lv_obj_t *row = make_row(scr, "WiFi");
     lv_obj_t *sw = lv_switch_create(row);
     lv_obj_add_event_cb(sw, wifi_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_group_add_obj(g, sw);
+    group_add_main(sw);
 
-    // Backlight spinbox (0..100, live)
+    // Backlight spinbox (0..100, live PWM)
     row = make_row(scr, "Light");
     lv_obj_t *sb = lv_spinbox_create(row);
     lv_spinbox_set_range(sb, 0, 100);
@@ -158,7 +204,7 @@ void ui_menu_start(void)
     lv_spinbox_set_value(sb, 100);
     lv_obj_set_width(sb, 54);
     lv_obj_add_event_cb(sb, backlight_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_group_add_obj(g, sb);
+    group_add_main(sb);
 
     // Mode dropdown
     row = make_row(scr, "Mode");
@@ -166,18 +212,13 @@ void ui_menu_start(void)
     lv_dropdown_set_options(dd, "Auto\nDay\nNight");
     lv_obj_set_width(dd, 70);
     lv_obj_add_event_cb(dd, mode_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_group_add_obj(g, dd);
+    group_add_main(dd);
 
-    // Actions
-    make_button(scr, "WiFi scan", wifi_scan_cb);
-    make_button(scr, "Sensors", sensors_cb);
-    make_button(scr, "Board info", board_info_cb);
+    // Action buttons -> open sub-pages
+    make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
+    make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
+    make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Reboot", reboot_cb);
 
-    // Shared output label
-    s_info = lv_label_create(scr);
-    lv_label_set_long_mode(s_info, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_info, lv_pct(100));
-    lv_label_set_text(s_info, "BTN1/2: move\nBTN3: select");
-    lv_obj_set_style_text_color(s_info, lv_color_hex(0x8A93A0), 0);
+    if (s_focus_n) lv_group_focus_obj(s_focus[0]);
 }

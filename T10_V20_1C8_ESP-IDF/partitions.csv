@@ -1,0 +1,6 @@
+# Custom partition table for 4 MB flash: a 3 MB app partition so the LVGL-based
+# firmware fits (the default single-app layout only gives 1 MB).
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000
+phy_init,   data, phy,      0xf000,   0x1000
+factory,    app,  factory,  0x10000,  0x300000
