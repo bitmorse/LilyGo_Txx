@@ -31,11 +31,40 @@ CONFIG_LV_USE_DROPDOWN=y
 CONFIG_LV_USE_SWITCH=y
 CONFIG_LV_USE_LABEL=y
 CONFIG_LV_USE_LIST=y
+CONFIG_LV_USE_QRCODE=y
+CONFIG_LV_USE_CHART=y
+CONFIG_LV_FONT_MONTSERRAT_10=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
-# Heap for LVGL objects. 48 KB is plenty for this small UI.
+# Heap for LVGL objects (DRAM). Kept small since BLE+WiFi+LVGL share RAM.
 CONFIG_LV_USE_STDLIB_MALLOC_BUILTIN=y
-CONFIG_LV_MEM_SIZE_KILOBYTES=48
+CONFIG_LV_MEM_SIZE_KILOBYTES=32
 # We drive lv_tick via esp_timer (lv_tick_set_cb), so no built-in tick.
 CONFIG_LV_USE_LOG=n
+
+# --- Bluetooth (BLE) for WiFi provisioning ---------------------------------
+# NimBLE host (lighter than Bluedroid) + BLE-only controller.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+# One BLE connection is enough for provisioning (saves RAM).
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+
+# --- RAM/IRAM reclamation (BLE+WiFi+LVGL together overflow internal RAM) ----
+# Build for size; frees flash, IRAM and DRAM.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# Move WiFi hot paths out of IRAM into flash (small throughput cost, big IRAM win).
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+# Move rarely-used FreeRTOS functions to flash.
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+# Trim WiFi static RX buffers a little (DRAM).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+
+# HTTPS: use the built-in CA certificate bundle (for the ZRH traffic fetch).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y

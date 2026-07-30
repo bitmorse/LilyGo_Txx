@@ -92,6 +92,7 @@ T10_V20_1C8_ESP-IDF/
     ├── idf_component.yml  # pulls in lvgl/lvgl ^9
     ├── i2c_bus.c/.h       # shared I2C master bus
     ├── imu.c/.h           # MPU9250 accel/gyro/temp + AK8963 mag
+    ├── provisioning.c/.h  # BLE WiFi provisioning + STA connect
     ├── wifi_scan.c/.h     # station-mode scan
     └── power.c/.h         # optional IP5306 keep-on (battery)
 ```
@@ -129,6 +130,39 @@ peripheral — see `main/sound.c`. Edit the `notes[]` / `durs[]` arrays in
 > second at 8 kHz) and needs a short source clip. Ask if you want it added.
 > **MP3** is intentionally not supported — it needs a heavyweight decoder that
 > isn't worth it for a boot chime.
+
+## WiFi setup (BLE provisioning)
+
+On first boot (no saved credentials) the device advertises over **BLE** and waits
+for the free Espressif **ESP BLE Provisioning** app to send your home WiFi
+SSID + password, which are saved to NVS and reused automatically on later boots.
+Bluetooth memory is released once provisioning finishes.
+
+To provision:
+
+1. Install **ESP BLE Provisioning** (iOS App Store / Google Play).
+2. Power the board; the menu's **Setup WiFi** page shows a **QR code** (plus the
+   device name `T10_XXXXXX` and PoP `t10setup` as a fallback).
+3. In the app: tap **Scan QR code** and point it at the screen — it auto-fills
+   the device and proof-of-possession — then choose your WiFi and enter its
+   password. (Or scan for the device manually and type PoP `t10setup`.)
+4. The board connects and remembers it. **Forget WiFi** erases the stored
+   network and reboots into pairing mode to switch networks.
+
+Implemented in `main/provisioning.c` (ESP-IDF `wifi_provisioning` over NimBLE).
+The proof-of-possession is `PROV_POP` in that file — change it for your own build.
+
+## ZRH airport traffic
+
+Once WiFi is connected, the **ZRH Traffic** menu item shows Zurich (LSZH)
+movements per hour of day as two LVGL bar charts: **Today** and **Usual / day**
+(a 14-day per-day average). The fetch/parse runs in a background task so the UI
+doesn't freeze, and the page invalidates any in-flight fetch when you press Back.
+
+- `main/airport.c` — `esp_http_client` + the mbedTLS CA bundle for HTTPS, then
+  cJSON to sum landings+takeoffs across all runway ends into `hourly[24]`, with a
+  per-hour day count so "usual" = total / days.
+- Data: `https://bitmorse.com/airports-api/LSZH/movements?days=N`.
 
 ## GUI / menu (LVGL 9)
 

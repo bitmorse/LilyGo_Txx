@@ -20,6 +20,7 @@
 #include "st7735.h"
 #include "buttons.h"
 #include "wifi_scan.h"
+#include "provisioning.h"
 #include "power.h"
 #include "sound.h"
 #include "imu.h"
@@ -46,7 +47,7 @@ void app_main(void)
     buttons_init();
     sound_init();
     imu_init();
-    wifi_scan_init();
+    provisioning_init();   // NVS + WiFi + BLE provisioning (or auto-connect)
 
     // Boot splash image + cute melody, drawn directly before LVGL takes over.
     st7735_draw_image(0, 0, BOOT_IMAGE_W, BOOT_IMAGE_H, boot_image);

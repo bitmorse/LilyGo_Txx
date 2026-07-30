@@ -15,8 +15,9 @@ static const char *TAG = "lvgl";
 #define DISP_HOR       ST7735_WIDTH
 #define DISP_VER       ST7735_HEIGHT
 
-// Partial render buffers: 1/4 screen each, double-buffered.
-#define BUF_LINES  40
+// Partial render buffers, double-buffered. Kept modest to save DRAM (BLE+WiFi
+// +LVGL share the ESP32's internal RAM).
+#define BUF_LINES  20
 static lv_color_t s_buf1[DISP_HOR * BUF_LINES];
 static lv_color_t s_buf2[DISP_HOR * BUF_LINES];
 
