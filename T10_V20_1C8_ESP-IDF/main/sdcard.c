@@ -35,7 +35,11 @@ bool sd_mount(void)
         .quadhd_io_num   = -1,
         .max_transfer_sz = 4096,
     };
-    esp_err_t err = spi_bus_initialize(SD_HOST, &buscfg, SDSPI_DEFAULT_DMA);
+    // NOTE: use SPI_DMA_CH_AUTO, not SDSPI_DEFAULT_DMA. On the ESP32 the latter
+    // is a legacy alias that resolves to a *fixed* channel 1 (== HSPI_HOST), which
+    // the TFT on SPI2 already owns -> "no available dma channel". AUTO picks the
+    // remaining free channel (2) so the display and SD card can share DMA.
+    esp_err_t err = spi_bus_initialize(SD_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(err));
         return false;
