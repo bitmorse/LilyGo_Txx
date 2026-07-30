@@ -13,3 +13,6 @@ void buttons_init(void);
 // Poll once. Returns a bitmask of buttons that transitioned to pressed since the
 // last call: bit (1<<BTN_x). Call this periodically (e.g. every 20-30 ms).
 int buttons_poll(void);
+
+// Current state of one button: 1 = pressed (active-low), 0 = released.
+int buttons_level(int idx);

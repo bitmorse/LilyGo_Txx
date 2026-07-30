@@ -4,6 +4,7 @@
 #include <string.h>
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -26,6 +27,12 @@ static const char *TAG = "st7735";
 #define ST7735_SPI_HZ   (20 * 1000 * 1000)
 
 #define ST7735_SPI_HOST SPI2_HOST
+
+// Backlight PWM (separate LEDC timer/channel from the speaker in sound.c).
+#define BL_LEDC_TIMER   LEDC_TIMER_1
+#define BL_LEDC_CHANNEL LEDC_CHANNEL_1
+#define BL_LEDC_MODE    LEDC_LOW_SPEED_MODE
+#define BL_LEDC_RES     LEDC_TIMER_8_BIT   // duty 0..255
 
 static spi_device_handle_t s_spi;
 
@@ -94,20 +101,49 @@ static void set_window(int16_t x0, int16_t y0, int16_t x1, int16_t y1)
     wr_cmd(0x2C);                                                                       // RAMWR
 }
 
+void st7735_set_brightness(uint8_t percent)
+{
+    if (percent > 100) percent = 100;
+    uint32_t duty = (uint32_t)percent * 255 / 100;
+    ledc_set_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL, duty);
+    ledc_update_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL);
+}
+
 void st7735_backlight(bool on)
 {
-    gpio_set_level(PIN_BL, on ? 1 : 0);
+    st7735_set_brightness(on ? 100 : 0);
+}
+
+static void backlight_init(void)
+{
+    ledc_timer_config_t tcfg = {
+        .speed_mode      = BL_LEDC_MODE,
+        .duty_resolution = BL_LEDC_RES,
+        .timer_num       = BL_LEDC_TIMER,
+        .freq_hz         = 5000,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    ledc_timer_config(&tcfg);
+    ledc_channel_config_t ccfg = {
+        .gpio_num   = PIN_BL,
+        .speed_mode = BL_LEDC_MODE,
+        .channel    = BL_LEDC_CHANNEL,
+        .timer_sel  = BL_LEDC_TIMER,
+        .duty       = 0,            // start dark
+        .hpoint     = 0,
+    };
+    ledc_channel_config(&ccfg);
 }
 
 void st7735_init(void)
 {
-    // DC and backlight as outputs.
+    // DC as output; backlight is driven by LEDC PWM (below).
     gpio_config_t io = {
-        .pin_bit_mask = (1ULL << PIN_DC) | (1ULL << PIN_BL),
+        .pin_bit_mask = (1ULL << PIN_DC),
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&io));
-    gpio_set_level(PIN_BL, 0);   // keep dark until the panel is initialised
+    backlight_init();            // keeps backlight off until init completes
 
     spi_bus_config_t buscfg = {
         .mosi_io_num = PIN_MOSI,
@@ -165,14 +201,14 @@ void st7735_fill_screen(uint16_t color)
     st7735_fill_rect(0, 0, ST7735_WIDTH, ST7735_HEIGHT, color);
 }
 
-void st7735_draw_image(int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t *data)
+void st7735_blit(int16_t x0, int16_t y0, int16_t x1, int16_t y1, const uint8_t *data)
 {
-    if (w <= 0 || h <= 0) return;
-    set_window(x, y, x + w - 1, y + h - 1);
+    if (x1 < x0 || y1 < y0) return;
+    set_window(x0, y0, x1, y1);
 
-    // The image usually lives in flash, which SPI DMA can't read directly, so
-    // copy it through the RAM fill buffer in chunks.
-    int total = (int)w * (int)h * 2;   // bytes
+    // The source may live in flash, which SPI DMA can't read directly, so copy
+    // it through the internal-RAM fill buffer in chunks.
+    int total = (int)(x1 - x0 + 1) * (int)(y1 - y0 + 1) * 2;  // bytes
     int off = 0;
     while (total > 0) {
         int chunk = total < (int)sizeof(s_fillbuf) ? total : (int)sizeof(s_fillbuf);
@@ -181,6 +217,12 @@ void st7735_draw_image(int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t
         off += chunk;
         total -= chunk;
     }
+}
+
+void st7735_draw_image(int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t *data)
+{
+    if (w <= 0 || h <= 0) return;
+    st7735_blit(x, y, x + w - 1, y + h - 1, data);
 }
 
 void st7735_draw_pixel(int16_t x, int16_t y, uint16_t color)

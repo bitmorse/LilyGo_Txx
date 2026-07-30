@@ -14,3 +14,23 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 
 # Serial console @ 115200 (what `make monitor` expects).
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# --- LVGL 9 configuration (Kconfig-driven; no manual lv_conf.h) -------------
+CONFIG_LV_CONF_SKIP=n
+CONFIG_LV_COLOR_DEPTH_16=y
+# ST7735 wants big-endian RGB565; we byte-swap in the flush callback instead of
+# here, so leave LV_COLOR_16_SWAP off.
+CONFIG_LV_USE_MENU=y
+CONFIG_LV_USE_SPINBOX=y
+CONFIG_LV_USE_DROPDOWN=y
+CONFIG_LV_USE_SWITCH=y
+CONFIG_LV_USE_LABEL=y
+CONFIG_LV_USE_LIST=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+# Heap for LVGL objects. 48 KB is plenty for this small UI.
+CONFIG_LV_USE_STDLIB_MALLOC_BUILTIN=y
+CONFIG_LV_MEM_SIZE_KILOBYTES=48
+# We drive lv_tick via esp_timer (lv_tick_set_cb), so no built-in tick.
+CONFIG_LV_USE_LOG=n

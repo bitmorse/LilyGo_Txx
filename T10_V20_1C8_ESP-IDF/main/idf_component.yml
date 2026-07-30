@@ -1,0 +1,6 @@
+## Managed component dependencies (fetched by the IDF Component Manager on build).
+dependencies:
+  idf: ">=5.1"
+  # LVGL 9 embedded GUI. Configured via Kconfig (see sdkconfig.defaults) so no
+  # manual lv_conf.h is needed.
+  lvgl/lvgl: "^9.2"

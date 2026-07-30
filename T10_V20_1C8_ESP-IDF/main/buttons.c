@@ -36,3 +36,9 @@ int buttons_poll(void)
     }
     return pressed;
 }
+
+int buttons_level(int idx)
+{
+    if (idx < 0 || idx > 2) return 0;
+    return gpio_get_level(s_pins[idx]) == 0 ? 1 : 0;   // active-low
+}

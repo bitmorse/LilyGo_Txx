@@ -27,6 +27,11 @@ static inline uint16_t st_rgb(uint8_t r, uint8_t g, uint8_t b) {
 
 void st7735_init(void);
 void st7735_backlight(bool on);
+void st7735_set_brightness(uint8_t percent);   // 0..100, PWM backlight
+
+// Stream a big-endian RGB565 byte buffer into the rectangle [x0,y0]..[x1,y1]
+// inclusive. Used by the LVGL flush callback.
+void st7735_blit(int16_t x0, int16_t y0, int16_t x1, int16_t y1, const uint8_t *data);
 
 void st7735_fill_screen(uint16_t color);
 void st7735_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);

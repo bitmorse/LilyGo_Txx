@@ -8,6 +8,8 @@ idf_component_register(
         "sound.c"
         "i2c_bus.c"
         "imu.c"
+        "lvgl_port.c"
+        "ui_menu.c"
     INCLUDE_DIRS "."
-    REQUIRES driver esp_wifi esp_netif esp_event nvs_flash esp_timer spi_flash esp_partition
+    REQUIRES driver esp_wifi esp_netif esp_event nvs_flash esp_timer spi_flash esp_partition lvgl
 )

@@ -8,12 +8,13 @@ What it does once flashed:
 
 - **Boot image** shown full-screen on the TFT, held until you press any button,
   with a **cute chiptune melody** played through the speaker on boot
-- Graphics on the TFT
-- A tiny 3-button menu:
-  - **BTN1** (GPIO35) → WiFi scan, results shown on screen + serial
-  - **BTN2** (GPIO34) → live **MPU9250 sensor** readout (accel / gyro / temp /
-    magnetometer), updating on screen until you press a key
-  - **BTN3** (GPIO39) → board info (chip, flash, RAM/heap, MAC)
+- An **LVGL 9** GUI with a settings menu, driven by the 3 buttons as an encoder:
+  - **BTN1** (GPIO35) = back / move up  (encoder rotate −)
+  - **BTN2** (GPIO34) = forward / move down (encoder rotate +)
+  - **BTN3** (GPIO39) = select / edit (encoder press)
+  - Fields: **WiFi switch**, **backlight number** (spinbox, live PWM),
+    **mode dropdown**, and actions (**WiFi scan**, **Sensors**, **Board info**,
+    **Reboot**).
 
   > Note: this unit wires the buttons to GPIO **35 / 34 / 39** — the LilyGO repo's
   > Arduino header claims 36/37/39, which is wrong for this board revision.
@@ -83,10 +84,13 @@ T10_V20_1C8_ESP-IDF/
     ├── app_main.c         # boot, menu loop, heartbeat
     ├── st7735.c/.h        # hand-written ST7735 SPI driver
     ├── font5x7.h          # built-in 5x7 ASCII font
-    ├── boot_image.h       # 128x160 boot splash (RGB565)
+    ├── boot_image.h       # 128x160 boot splash (RGB565, gitignored/generated)
     ├── sound.c/.h         # speaker melody (GPIO25, LEDC)
     ├── buttons.c/.h       # GPIO 35/34/39 (active-low)
-    ├── i2c_bus.c/.h       # shared I2C master bus (SDA21/SCL22)
+    ├── lvgl_port.c/.h     # LVGL <-> ST7735 flush + 3-button encoder
+    ├── ui_menu.c/.h       # LVGL settings screen (swap for EEZ output)
+    ├── idf_component.yml  # pulls in lvgl/lvgl ^9
+    ├── i2c_bus.c/.h       # shared I2C master bus
     ├── imu.c/.h           # MPU9250 accel/gyro/temp + AK8963 mag
     ├── wifi_scan.c/.h     # station-mode scan
     └── power.c/.h         # optional IP5306 keep-on (battery)
@@ -125,6 +129,41 @@ peripheral — see `main/sound.c`. Edit the `notes[]` / `durs[]` arrays in
 > second at 8 kHz) and needs a short source clip. Ask if you want it added.
 > **MP3** is intentionally not supported — it needs a heavyweight decoder that
 > isn't worth it for a boot chime.
+
+## GUI / menu (LVGL 9)
+
+The UI is built with **LVGL 9**, pulled in automatically as a managed component
+(`main/idf_component.yml`) — the first `make build` downloads it. LVGL is
+configured via Kconfig in `sdkconfig.defaults` (`CONFIG_LV_*`).
+
+- `main/lvgl_port.c` wires LVGL to this board: the display flush goes through our
+  ST7735 driver (`st7735_blit`, with RGB565 byte-swap), and the **3 buttons act
+  as an LVGL encoder** input device (BTN1 = rotate back, BTN2 = rotate forward,
+  BTN3 = press). All navigable widgets live in one input `group`
+  (`lvgl_port_group()`).
+- `main/ui_menu.c` is the hand-coded settings screen (switch / spinbox / dropdown
+  / action buttons). It's the reference for how widgets are created and added to
+  the encoder group.
+
+### Editing the UI visually with EEZ Studio
+
+[EEZ Studio](https://www.envox.eu/studio/) is a free, open-source drag-and-drop
+editor that exports LVGL 9 C code (the SquareLine Studio alternative).
+
+1. Install EEZ Studio, create a **new LVGL project**, LVGL version **9.x**,
+   display **128 × 160**.
+2. In project settings, set the input to an **encoder / keypad group** (so the
+   generated screens are navigable without a touchscreen).
+3. Design your screens (labels, switches, spinboxes, dropdowns, sliders…).
+4. **Build/Export** — point the output at `main/ui/` in this project.
+5. Add the generated sources to the build: either list them in
+   `main/CMakeLists.txt` `SRCS`, or (simpler) add `main/ui` as its own component.
+6. In `app_main`, replace `ui_menu_start()` with the generated `ui_init()`, then
+   add the exported screen's widgets to `lvgl_port_group()` (EEZ can emit the
+   group-add calls if you assigned widgets to a group in the editor).
+
+The `lvgl_port` layer (display + encoder + tick + task) stays the same no matter
+how the screens are authored — EEZ just replaces `ui_menu.c`.
 
 ## Tuning the display
 
