@@ -42,8 +42,20 @@ test code** — every pin matches. It is the source of truth for this project.
 | I²C SCL | 18 | |
 | **Audio** | | |
 | Speaker out | 25 | DAC1 → **NS4148 class-D amp** → LC filter → speaker |
-| **microSD** (not used by this fw) | | |
-| SD CS / MOSI / SCK / MISO | 13 / 15 / 14 / 2 | |
+| **microSD** (SPI3, vibration logging) | | own SPI bus, separate from the TFT |
+| SD SCK / MOSI / MISO / CS | 14 / 15 / 2 / 13 | FAT mount at `/sdcard` |
+
+## IMU / vibration logging notes
+The MPU9250 is a **consumer 9-axis IMU**, not a lab accelerometer. For the
+vibration logger (`viblog.c`) it runs at its ceiling: **4 kHz** output data rate
+(accel DLPF bypassed, ~1 kHz usable bandwidth), **±16 g** (2048 LSB/g), gyro/mag
+powered down, streamed through the on-chip **512-byte FIFO**. The FIFO is drained
+over a dedicated **1 MHz** (fast-mode-plus) I²C device handle — needed for the
+24 KB/s the accel produces; it falls back to 400 kHz (≈3 kHz reliable) if the
+board's pull-ups can't sustain 1 MHz. There is **no MPU interrupt pin wired to the
+ESP32** on this board, so sample timing uses the nominal 4 kHz ODR (±~3 %), not a
+hardware data-ready line. Good for general machine/structure vibration and
+dominant-frequency tracking; not for high-frequency bearing-defect analysis.
 
 ## Audio detail
 GPIO25 (8-bit DAC) is **AC-coupled into an NS4148 class-D amplifier** (`U17` on the

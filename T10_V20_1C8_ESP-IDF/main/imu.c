@@ -14,9 +14,16 @@ static const char *TAG = "imu";
 #define REG_CONFIG      0x1A
 #define REG_GYRO_CFG    0x1B
 #define REG_ACCEL_CFG   0x1C
+#define REG_ACCEL_CFG2  0x1D   // accel DLPF / FCHOICE (bit3 = A_FCHOICE_B)
+#define REG_FIFO_EN     0x23
+#define REG_INT_STATUS  0x3A   // bit4 = FIFO_OFLOW_INT
 #define REG_INT_PIN_CFG 0x37
 #define REG_ACCEL_XOUT  0x3B   // 14 bytes: accel(6) temp(2) gyro(6)
+#define REG_USER_CTRL   0x6A   // bit6 FIFO_EN, bit2 FIFO_RST
 #define REG_PWR_MGMT_1  0x6B
+#define REG_PWR_MGMT_2  0x6C   // per-axis stby: bits5-3 accel, bits2-0 gyro
+#define REG_FIFO_COUNTH 0x72   // 2 bytes, big-endian, valid entries
+#define REG_FIFO_R_W    0x74   // FIFO read/write port
 #define REG_WHO_AM_I    0x75
 #define MPU_WHOAMI      0x71
 
@@ -34,8 +41,10 @@ static const char *TAG = "imu";
 
 static i2c_master_dev_handle_t s_mpu = NULL;
 static i2c_master_dev_handle_t s_mag = NULL;
+static i2c_master_dev_handle_t s_mpu_fast = NULL;  // 1 MHz handle for FIFO bursts
 static uint8_t s_addr = 0;      // address the IMU answered on (0 = none)
 static uint8_t s_whoami = 0;    // WHO_AM_I value read (for diagnostics)
+static float   s_hires_lsb_per_g = 2048.0f;        // set by imu_hires_start()
 
 uint8_t imu_last_addr(void)   { return s_addr; }
 uint8_t imu_last_whoami(void) { return s_whoami; }
@@ -51,16 +60,22 @@ static esp_err_t rd(i2c_master_dev_handle_t d, uint8_t reg, uint8_t *buf, size_t
     return i2c_master_transmit_receive(d, &reg, 1, buf, n, 100);
 }
 
-static i2c_master_dev_handle_t add_dev(i2c_master_bus_handle_t bus, uint8_t addr)
+static i2c_master_dev_handle_t add_dev_speed(i2c_master_bus_handle_t bus,
+                                             uint8_t addr, uint32_t hz)
 {
     i2c_device_config_t cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = addr,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = hz,
     };
     i2c_master_dev_handle_t h = NULL;
     if (i2c_master_bus_add_device(bus, &cfg, &h) != ESP_OK) return NULL;
     return h;
+}
+
+static i2c_master_dev_handle_t add_dev(i2c_master_bus_handle_t bus, uint8_t addr)
+{
+    return add_dev_speed(bus, addr, 400000);
 }
 
 bool imu_init(void)
@@ -165,4 +180,104 @@ bool imu_read(imu_data_t *out)
 
     out->ok = true;
     return true;
+}
+
+// --- high-rate accelerometer FIFO mode (industrial vibration logging) --------
+//
+// Reconfigures the accelerometer for its maximum 4 kHz output data rate (DLPF
+// bypassed, ~1 kHz bandwidth) at +/-16 g and streams samples through the on-chip
+// 512-byte FIFO. A dedicated 1 MHz I2C handle drains the FIFO fast enough to keep
+// up with the 24 KB/s the accelerometer produces. Gyro/temp/mag are powered down.
+//
+// This is a *different* configuration than imu_read()'s 200 Hz mode; call
+// imu_hires_stop() (or re-run imu_init()) to return to the live-Sensors mode.
+
+float imu_hires_lsb_per_g(void) { return s_hires_lsb_per_g; }
+
+bool imu_hires_start(void)
+{
+    if (s_mpu == NULL) return false;
+
+    i2c_master_bus_handle_t bus = i2c_bus_get();
+    if (s_mpu_fast == NULL && bus)
+        s_mpu_fast = add_dev_speed(bus, s_addr, 1000000);  // fast-mode-plus
+    // If the 1 MHz handle can't be created, fall back to the 400 kHz handle;
+    // the achieved rate will be lower (see docs) but logging still works.
+    i2c_master_dev_handle_t dev = s_mpu_fast ? s_mpu_fast : s_mpu;
+
+    wr(dev, REG_PWR_MGMT_1, 0x01);      // wake, best available clock
+    vTaskDelay(pdMS_TO_TICKS(5));
+    wr(dev, REG_PWR_MGMT_2, 0x07);      // accel on, gyro off (saves power/bus)
+    wr(dev, REG_ACCEL_CFG,  0x18);      // ACCEL_FS_SEL = 3 -> +/-16 g
+    wr(dev, REG_ACCEL_CFG2, 0x08);      // A_FCHOICE_B=1: DLPF off -> 4 kHz ODR
+    s_hires_lsb_per_g = 2048.0f;        // +/-16 g full-scale
+
+    // Reset then enable the FIFO, routing only the accelerometer into it.
+    wr(dev, REG_USER_CTRL, 0x04);       // FIFO_RST
+    vTaskDelay(pdMS_TO_TICKS(2));
+    wr(dev, REG_FIFO_EN,   0x08);       // ACCEL -> FIFO
+    wr(dev, REG_USER_CTRL, 0x40);       // FIFO_EN
+    ESP_LOGI(TAG, "hi-rate FIFO started (+/-16 g, 4 kHz, %s)",
+             s_mpu_fast ? "I2C 1 MHz" : "I2C 400 kHz fallback");
+    return true;
+}
+
+// Drain the FIFO into `dst` (int16 x,y,z triples). `max_samples` is the capacity
+// of dst in *samples* (dst must hold max_samples*3 int16). Returns the number of
+// samples read. If the FIFO overflowed since the last call, *overflow is set true
+// and the FIFO is reset (the gap in the stream is the caller's to account for).
+int imu_hires_read(int16_t *dst, int max_samples, bool *overflow)
+{
+    i2c_master_dev_handle_t dev = s_mpu_fast ? s_mpu_fast : s_mpu;
+    if (dev == NULL || dst == NULL || max_samples <= 0) return 0;
+
+    if (overflow) *overflow = false;
+
+    uint8_t st = 0;
+    if (rd(dev, REG_INT_STATUS, &st, 1) == ESP_OK && (st & 0x10)) {
+        // FIFO overflowed: samples were lost and 6-byte framing may be broken.
+        // Reset it and report the gap rather than logging misaligned garbage.
+        wr(dev, REG_USER_CTRL, 0x04);   // FIFO_RST
+        wr(dev, REG_USER_CTRL, 0x40);   // FIFO_EN
+        if (overflow) *overflow = true;
+        return 0;
+    }
+
+    uint8_t cnt[2];
+    if (rd(dev, REG_FIFO_COUNTH, cnt, 2) != ESP_OK) return 0;
+    int bytes = (cnt[0] << 8) | cnt[1];
+    int samples = bytes / 6;                        // 6 bytes per accel sample
+    if (samples <= 0) return 0;
+    if (samples > max_samples) samples = max_samples;
+
+    // Burst-read in bounded chunks (I2C transfer + our stack buffer).
+    uint8_t buf[60];                                // 10 samples per burst
+    int done = 0;
+    while (done < samples) {
+        int chunk = samples - done;
+        if (chunk > 10) chunk = 10;
+        if (rd(dev, REG_FIFO_R_W, buf, chunk * 6) != ESP_OK) break;
+        for (int i = 0; i < chunk; i++) {
+            const uint8_t *p = &buf[i * 6];
+            int16_t *o = &dst[(done + i) * 3];
+            o[0] = be16(&p[0]);
+            o[1] = be16(&p[2]);
+            o[2] = be16(&p[4]);
+        }
+        done += chunk;
+    }
+    return done;
+}
+
+void imu_hires_stop(void)
+{
+    i2c_master_dev_handle_t dev = s_mpu_fast ? s_mpu_fast : s_mpu;
+    if (dev == NULL) return;
+    wr(dev, REG_FIFO_EN,   0x00);       // stop feeding the FIFO
+    wr(dev, REG_USER_CTRL, 0x04);       // FIFO_RST (flush)
+    // Restore the gentle live-Sensors configuration (200 Hz, +/-2 g, gyro on).
+    wr(dev, REG_PWR_MGMT_2, 0x00);
+    wr(dev, REG_ACCEL_CFG2, 0x03);      // DLPF ~41 Hz
+    wr(dev, REG_ACCEL_CFG,  0x00);      // +/-2 g
+    ESP_LOGI(TAG, "hi-rate FIFO stopped");
 }

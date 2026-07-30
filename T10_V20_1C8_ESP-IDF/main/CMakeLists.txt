@@ -12,10 +12,14 @@ idf_component_register(
         "airport.c"
         "audio.c"
         "radio.c"
+        "sdcard.c"
+        "mcap.c"
+        "accel_encode.c"
+        "viblog.c"
         "lvgl_port.c"
         "ui_menu.c"
     INCLUDE_DIRS "."
     REQUIRES driver esp_wifi esp_netif esp_event nvs_flash esp_timer spi_flash esp_partition
              wifi_provisioning bt esp_http_client esp-tls json esp_driver_dac
-             esp-libhelix-mp3 lvgl
+             esp-libhelix-mp3 lvgl fatfs sdmmc esp_driver_sdspi esp_driver_spi
 )

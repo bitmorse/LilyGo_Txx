@@ -6,6 +6,7 @@
 #include "airport.h"
 #include "audio.h"
 #include "radio.h"
+#include "viblog.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -481,6 +482,96 @@ static void radio_cb(lv_event_t *e)
     lv_group_focus_obj(play);
 }
 
+// --- Vibration logging (high-rate accel -> SD as MCAP) ----------------------
+
+static lv_obj_t     *s_vib_label;
+static lv_obj_t     *s_vib_btn_label;
+static lv_timer_t   *s_vib_timer;
+static volatile bool s_vib_busy;
+
+static void vib_update(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_vib_label) return;
+    viblog_status_t s;
+    viblog_get_status(&s);
+
+    char buf[176];
+    if (s.running) {
+        const char *f = strrchr(s.path, '/');
+        f = f ? f + 1 : s.path;
+        snprintf(buf, sizeof(buf),
+                 LV_SYMBOL_AUDIO " REC  %s\n%us   %uk smp\ndrop %u   buf %u%%\n"
+                 "%u KB   clock %s",
+                 f, (unsigned)s.elapsed_s, (unsigned)(s.samples / 1000),
+                 (unsigned)s.drops, (unsigned)s.buf_pct,
+                 (unsigned)(s.bytes / 1024), s.time_synced ? "UTC" : "mono");
+    } else if (s.err[0]) {
+        snprintf(buf, sizeof(buf), "Idle\n\nError:\n%s", s.err);
+    } else {
+        snprintf(buf, sizeof(buf),
+                 "Idle\n\n4 kHz +/-16g accel\nlogged to SD as\nMCAP. Insert a\n"
+                 "card, press Start.");
+    }
+    lv_label_set_text(s_vib_label, buf);
+
+    if (s_vib_btn_label)
+        lv_label_set_text(s_vib_btn_label,
+            s.running ? LV_SYMBOL_STOP " Stop" : LV_SYMBOL_PLAY " Start");
+}
+
+// Start/stop can block (SD mount, flushing/closing the file), so run it off the
+// LVGL task -- never block the UI thread (it holds the LVGL mutex).
+static void vib_toggle_task(void *arg)
+{
+    (void)arg;
+    if (viblog_is_running()) viblog_stop();
+    else                     viblog_start();
+    s_vib_busy = false;
+    vTaskDelete(NULL);
+}
+
+static void vib_toggle_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_vib_busy) return;                 // ignore presses while (un)mounting
+    s_vib_busy = true;
+    xTaskCreate(vib_toggle_task, "vibtog", 5120, NULL, 5, NULL);
+}
+
+static void vib_back_cb(lv_event_t *e)
+{
+    if (s_vib_timer) { lv_timer_delete(s_vib_timer); s_vib_timer = NULL; }
+    s_vib_label = s_vib_btn_label = NULL;   // logging keeps running in background
+    back_cb(e);
+}
+
+static void vib_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *page = page_shell("Vibration Log");
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+
+    s_vib_label = page_text(page, "...");
+
+    // Start/Stop button (built inline so we can update its label live).
+    lv_obj_t *b = lv_button_create(page);
+    lv_obj_set_width(b, lv_pct(100));
+    s_vib_btn_label = lv_label_create(b);
+    lv_label_set_text(s_vib_btn_label, LV_SYMBOL_PLAY " Start");
+    lv_obj_center(s_vib_btn_label);
+    lv_obj_add_event_cb(b, vib_toggle_cb, LV_EVENT_CLICKED, NULL);
+    page_focus_stop(b);
+
+    vib_update(NULL);
+    s_vib_timer = lv_timer_create(vib_update, 500, NULL);
+
+    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", vib_back_cb);
+    lv_screen_load(page);
+    lv_group_focus_obj(b);
+    (void)back;
+}
+
 static void reboot_cb(lv_event_t *e)
 {
     (void)e;
@@ -537,6 +628,7 @@ void ui_menu_start(void)
     make_button(scr, "Radio " LV_SYMBOL_RIGHT, radio_cb);
     make_button(scr, "Audio Clips " LV_SYMBOL_RIGHT, audio_clips_cb);
     make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
+    make_button(scr, "Vibration Log " LV_SYMBOL_RIGHT, vib_cb);
     make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
     make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Setup WiFi " LV_SYMBOL_RIGHT, wifi_setup_cb);

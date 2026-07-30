@@ -27,7 +27,7 @@ PORT ?= $(shell ls /dev/cu.SLAB_USBtoUART /dev/cu.usbserial* /dev/cu.wchusbseria
 # Source the IDF environment and run idf.py in a single shell invocation.
 IDF = source "$(IDF_PATH)/export.sh" >/dev/null 2>&1 && idf.py
 
-.PHONY: default all setup check venv boot-image audio sdkconfig-sync build flash monitor flash-monitor menuconfig erase clean fullclean size port help
+.PHONY: default all setup check venv boot-image audio sdkconfig-sync build flash monitor flash-monitor menuconfig erase clean fullclean size port test schema help
 
 default: build
 
@@ -128,6 +128,18 @@ clean: check
 
 fullclean: check
 	@$(IDF) fullclean
+
+## --- tests -----------------------------------------------------------------
+
+# Host-side unit + integration tests for the pure-C logic (MCAP writer, protobuf
+# encoder). No board or ESP-IDF needed -- just a C compiler. See tools/run_tests.sh.
+test:
+	@bash tools/run_tests.sh
+
+# Regenerate main/accel_schema.h from tools/accel.proto (needs protoc). The header
+# is committed, so this is only needed when the .proto changes.
+schema:
+	@bash tools/gen_schema.sh
 
 ## --- helpers ---------------------------------------------------------------
 

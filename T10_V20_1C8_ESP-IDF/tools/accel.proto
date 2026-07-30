@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package vibration;
+
+// A batch of accelerometer samples captured at a fixed rate. Batching keeps the
+// MCAP message rate low (~8/s at 4 kHz) while the packed float arrays store the
+// raw waveform for offline FFT / vibration analysis.
+message AccelBatch {
+  // UTC time of the FIRST sample in this batch, nanoseconds since the Unix epoch.
+  fixed64 t0_ns = 1;
+  // Nominal sample rate, Hz. Sample n has time t0_ns + round(n * 1e9 / rate_hz).
+  uint32 rate_hz = 2;
+  // Acceleration per sample, in g (1 g = 9.80665 m/s^2). x/y/z are equal length.
+  repeated float x = 3;
+  repeated float y = 4;
+  repeated float z = 5;
+}

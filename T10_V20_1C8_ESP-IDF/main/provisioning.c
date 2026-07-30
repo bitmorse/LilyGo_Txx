@@ -1,11 +1,14 @@
 #include "provisioning.h"
 
 #include <string.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -86,7 +89,39 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         s_retries = 0;
         s_state = PROV_CONNECTED;
         ESP_LOGI(TAG, "WiFi connected, got IP");
+
+        // Start SNTP once so the vibration log can stamp samples with real UTC.
+        static bool sntp_started = false;
+        if (!sntp_started) {
+            sntp_started = true;
+            esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+            esp_netif_sntp_init(&cfg);
+            ESP_LOGI(TAG, "SNTP started (pool.ntp.org)");
+        }
     }
+}
+
+// --- wall-clock time --------------------------------------------------------
+
+// Unix epoch (seconds) below which we treat the RTC as "not yet synced".
+#define TIME_SYNCED_EPOCH 1700000000ULL   // 2023-11-14
+
+bool time_is_synced(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec >= TIME_SYNCED_EPOCH;
+}
+
+uint64_t time_now_ns(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if ((uint64_t)tv.tv_sec >= TIME_SYNCED_EPOCH)
+        return (uint64_t)tv.tv_sec * 1000000000ULL + (uint64_t)tv.tv_usec * 1000ULL;
+    // Not synced yet: fall back to a monotonic clock (not wall time, but the
+    // sample *spacing* stays correct, which is what vibration analysis needs).
+    return (uint64_t)esp_timer_get_time() * 1000ULL;
 }
 
 static void make_service_name(void)

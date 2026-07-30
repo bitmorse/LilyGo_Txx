@@ -91,7 +91,11 @@ T10_V20_1C8_ESP-IDF/
     ├── ui_menu.c/.h       # LVGL settings screen (swap for EEZ output)
     ├── idf_component.yml  # pulls in lvgl/lvgl ^9
     ├── i2c_bus.c/.h       # shared I2C master bus
-    ├── imu.c/.h           # MPU9250 accel/gyro/temp + AK8963 mag
+    ├── imu.c/.h           # MPU9250 accel/gyro/temp + AK8963 mag (+ hi-rate FIFO)
+    ├── sdcard.c/.h        # microSD FAT mount on SPI3
+    ├── mcap.c/.h          # minimal streaming MCAP writer
+    ├── viblog.c/.h        # vibration logger (4kHz accel -> SD as MCAP)
+    ├── accel_schema.h     # protobuf descriptor for AccelBatch (gen_schema.sh)
     ├── provisioning.c/.h  # BLE WiFi provisioning + STA connect
     ├── wifi_scan.c/.h     # station-mode scan
     └── power.c/.h         # optional IP5306 keep-on (battery)
@@ -178,6 +182,65 @@ press to play once.
 
 > The boot melody uses LEDC on the same GPIO25; the first clip playback resets
 > the pin so the DAC takes over (tones are boot-only, so this is a one-way handoff).
+
+## Vibration logging (high-rate accel → SD, MCAP)
+
+An **industrial vibration-monitoring** mode: capture the onboard MPU9250
+accelerometer at its **4 kHz / ±16 g** maximum and stream it to the microSD card
+as an **[MCAP](https://mcap.dev)** file you can open in **Foxglove Studio** or crunch
+with numpy. Menu → **Vibration Log** → **Start**; **Stop** flushes and closes the file.
+
+- **Capture:** accel-only, ±16 g, 4 kHz via the MPU9250 **FIFO** (DLPF bypassed,
+  ~1 kHz usable bandwidth). A dedicated 1 MHz I²C handle drains the FIFO.
+- **Path:** the sampler task (core 1) pushes raw `int16` samples through a 32 KB
+  FreeRTOS StreamBuffer to the writer task (core 0), which batches 500 samples,
+  protobuf-encodes an `AccelBatch`, and appends one MCAP message (~8 msgs/s).
+- **File:** `/sdcard/vibNNNN.mcap` (next free number). Grows ~24 KB/s. MCAP is
+  append-only, so a yanked-power file is still readable up to the last flush.
+- **Time:** samples are stamped with **UTC** once NTP has synced (WiFi stays on);
+  before sync it falls back to a monotonic clock (spacing stays exact). The status
+  screen shows `clock UTC` vs `mono`.
+- **Data quality:** the screen shows achieved samples, **dropped** samples (FIFO
+  overflow / SD stalls — target 0), buffer fill %, and SD free space. Drops are
+  always counted, never silent.
+
+Implemented across `main/imu.c` (`imu_hires_*` FIFO mode), `main/sdcard.c`
+(SPI3 FAT mount), `main/mcap.c` (hand-written minimal MCAP writer), and
+`main/viblog.c` (the orchestrator). The protobuf schema is `tools/accel.proto`,
+compiled to the embedded descriptor `main/accel_schema.h` by `tools/gen_schema.sh`
+(needs `protoc`; the header is committed, so the normal build has no protoc dependency).
+
+### Reading the file
+
+```proto
+message AccelBatch {                 // one per MCAP message, /accel topic
+  fixed64 t0_ns  = 1;                // UTC ns of the first sample in the batch
+  uint32  rate_hz = 2;              // 4000
+  repeated float x = 3;             // acceleration in g, one per sample
+  repeated float y = 4;
+  repeated float z = 5;             // sample n time = t0_ns + n*1e9/rate_hz
+}
+```
+
+In **Foxglove Studio**: File → Open local file → `vibNNNN.mcap`; the `/accel`
+topic exposes the decoded `AccelBatch`. For a time-domain waveform or FFT the
+batched arrays are best read programmatically — e.g.:
+
+```python
+# pip install mcap mcap-protobuf-support numpy
+from mcap_protobuf.decoder import DecoderFactory
+from mcap.reader import make_reader
+import numpy as np
+x=[]
+with open("vib0000.mcap","rb") as f:
+    for _,_,_,msg in make_reader(f, decoder_factories=[DecoderFactory()]).iter_decoded_messages():
+        x.extend(msg.x)                       # concat all batches
+x=np.array(x); print(len(x),"samples"); print(np.abs(np.fft.rfft(x))[:20])
+```
+
+> **Sensor honesty:** the MPU9250 is a consumer IMU — 4 kHz ODR, ~1 kHz bandwidth,
+> ±16 g. Great for general machine/structure vibration and dominant-frequency
+> tracking; not a lab-grade accelerometer for high-frequency bearing analysis.
 
 ## GUI / menu (LVGL 9)
 

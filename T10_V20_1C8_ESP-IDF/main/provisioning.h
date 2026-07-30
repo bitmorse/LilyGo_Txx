@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef enum {
     PROV_IDLE,        // not started
@@ -28,3 +29,7 @@ int  provisioning_rssi(void);                    // AP signal in dBm (0 if not c
 
 // Erase stored credentials and reboot into BLE pairing mode ("Setup WiFi" again).
 void provisioning_reset_and_restart(void);
+
+// Wall-clock time, sourced from SNTP once WiFi is up (started on first GOT_IP).
+bool     time_is_synced(void);   // true once NTP has set the RTC
+uint64_t time_now_ns(void);      // UTC ns if synced, else monotonic esp_timer ns
