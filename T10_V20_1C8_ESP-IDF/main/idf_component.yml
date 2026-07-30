@@ -4,3 +4,5 @@ dependencies:
   # LVGL 9 embedded GUI. Configured via Kconfig (see sdkconfig.defaults) so no
   # manual lv_conf.h is needed.
   lvgl/lvgl: "^9.2"
+  # Fixed-point MP3 decoder (internet radio prototype).
+  chmorgan/esp-libhelix-mp3: "^1.0.0"

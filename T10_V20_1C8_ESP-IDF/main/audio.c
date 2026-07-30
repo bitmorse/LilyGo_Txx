@@ -10,9 +10,8 @@
 
 static const char *TAG = "audio";
 
-static dac_continuous_handle_t s_dac;
-static QueueHandle_t           s_queue;    // pending play requests (clip index)
-static volatile bool           s_busy;
+static QueueHandle_t   s_queue;    // pending play requests (clip index)
+static volatile bool   s_busy;
 
 int audio_clip_count(void) { return AUDIO_CLIP_COUNT; }
 
@@ -21,57 +20,46 @@ const char *audio_clip_name(int index)
     return (index >= 0 && index < AUDIO_CLIP_COUNT) ? g_audio_clips[index].name : "";
 }
 
-// Lazily bring up the DAC. The boot melody used LEDC on GPIO25; reset the pin so
-// the DAC cleanly takes it over (one-way handoff -- no tones after this).
-static void dac_init_once(void)
+// Play one clip on a FRESH DAC channel, then tear it down. dac_continuous is a
+// streaming API -- reusing one channel for repeated one-shots leaks DMA
+// descriptors (the loop never releases them), which exhausts the pool after ~9
+// plays and wedges playback until reboot. Create/destroy per clip = clean pool
+// every time. The setup cost is trivial for button-triggered playback.
+static void play_clip(const audio_clip_t *c)
 {
-    if (s_dac) return;
-    gpio_reset_pin(GPIO_NUM_25);
-
-    // 32 KB DMA buffer holds a whole clip (<=2 s @ 16 kHz) in one write, so the
-    // write never has to wait for mid-transfer descriptor recycling (that
-    // recycling was stalling and timing out on the larger clips).
+    dac_continuous_handle_t dac = NULL;
     dac_continuous_config_t cfg = {
-        .chan_mask  = DAC_CHANNEL_MASK_CH0,     // CH0 = GPIO25
-        .desc_num   = 16,
-        .buf_size   = 2048,
-        .freq_hz    = AUDIO_SAMPLE_RATE,
-        .offset     = 0,
-        // APLL can divide down to audio rates; the default clock can't reach
-        // 16 kHz (its mclk divider overflows -> "mclk division exceed 255").
-        .clk_src    = DAC_DIGI_CLK_SRC_APLL,
-        .chan_mode  = DAC_CHANNEL_MODE_SIMUL,
+        .chan_mask = DAC_CHANNEL_MASK_CH0,      // CH0 = GPIO25
+        .desc_num  = 8,
+        .buf_size  = 2048,
+        .freq_hz   = AUDIO_SAMPLE_RATE,
+        .offset    = 0,
+        .clk_src   = DAC_DIGI_CLK_SRC_APLL,     // APLL divides down to 16 kHz
+        .chan_mode = DAC_CHANNEL_MODE_SIMUL,
     };
-    if (dac_continuous_new_channels(&cfg, &s_dac) != ESP_OK) {
-        ESP_LOGW(TAG, "DAC init failed");
-        s_dac = NULL;
-        return;
-    }
-    dac_continuous_enable(s_dac);       // enable ONCE; never cycled (cycling stalled)
-    ESP_LOGI(TAG, "DAC ready @ %d Hz", AUDIO_SAMPLE_RATE);
+    esp_err_t r = dac_continuous_new_channels(&cfg, &dac);
+    if (r != ESP_OK) { ESP_LOGW(TAG, "new_channels %s", esp_err_to_name(r)); return; }
+
+    int play_ms = (int)(c->len / (AUDIO_SAMPLE_RATE / 1000));   // clip duration
+    dac_continuous_enable(dac);
+    r = dac_continuous_write(dac, (uint8_t *)c->data, c->len, NULL, play_ms + 2000);
+    if (r != ESP_OK) ESP_LOGW(TAG, "write %s", esp_err_to_name(r));
+    vTaskDelay(pdMS_TO_TICKS(play_ms + 150));    // let it finish before teardown
+    dac_continuous_disable(dac);
+    dac_continuous_del_channels(dac);
 }
 
-// Mid-rail silence (128) written after each clip so the DMA loops silence, not
-// the clip's tail.
-static const uint8_t s_silence[2048] = { [0 ... 2047] = 128 };
-
-// One long-lived task drains the queue (no per-press task creation). The DAC is
-// enabled once and stays running; each clip fits the DMA buffer so writes never
-// block on descriptor recycling.
 static void audio_task(void *arg)
 {
     (void)arg;
-    dac_init_once();
+    gpio_reset_pin(GPIO_NUM_25);   // release LEDC (boot melody) so the DAC can use it
     int idx;
     while (xQueueReceive(s_queue, &idx, portMAX_DELAY)) {
         s_busy = true;
-        if (s_dac && idx >= 0 && idx < AUDIO_CLIP_COUNT) {
+        if (idx >= 0 && idx < AUDIO_CLIP_COUNT) {
             const audio_clip_t *c = &g_audio_clips[idx];
             ESP_LOGI(TAG, "play '%s' (%u bytes)", c->name, (unsigned)c->len);
-            int ms = (int)(c->len / (AUDIO_SAMPLE_RATE / 1000)) + 2000;
-            esp_err_t r = dac_continuous_write(s_dac, (uint8_t *)c->data, c->len, NULL, ms);
-            if (r != ESP_OK) ESP_LOGW(TAG, "write returned %s", esp_err_to_name(r));
-            dac_continuous_write(s_dac, (uint8_t *)s_silence, sizeof(s_silence), NULL, 2000);
+            play_clip(c);
         }
         s_busy = false;
     }

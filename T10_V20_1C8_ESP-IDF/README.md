@@ -234,12 +234,17 @@ Then `make flash`. Common fixes:
 - Image shifted a few px: adjust `COLSTART` / `ROWSTART`.
 - Whole image mirrored/upside-down: flip the `0x40` (MX) / `0x80` (MY) bits in `MADCTL`.
 
-## Pin reference (T10 V2.0)
+## Pin reference (TTGO TS / T10 V2.0, 1.8")
+
+Full board identity, the verified pin map, the NS4148 audio amp, free GPIOs, and
+the schematic are in **[`docs/HARDWARE.md`](docs/HARDWARE.md)** (with the schematic
+PDF in `docs/`). Quick version:
 
 | Signal | GPIO | | Signal | GPIO |
 |--------|------|-|--------|------|
 | TFT MOSI | 23 | | TFT backlight | 27 |
-| TFT SCLK | 5  | | Button 1 | 35 |
-| TFT CS   | 16 | | Button 2 | 34 |
-| TFT DC   | 17 | | Button 3 | 39 |
-| TFT RST  | — (software) | | IP5306 I2C | SDA 21 / SCL 22 |
+| TFT SCLK | 5  | | Button 1 (enter) | 35 |
+| TFT CS   | 16 | | Button 2 (up) | 34 |
+| TFT DC   | 17 | | Button 3 (down) | 39 |
+| TFT RST  | — (software) | | I2C SDA/SCL (MPU9250) | 19 / 18 |
+| Speaker (DAC → NS4148 amp) | 25 | | SD CS/MOSI/SCK/MISO | 13/15/14/2 |

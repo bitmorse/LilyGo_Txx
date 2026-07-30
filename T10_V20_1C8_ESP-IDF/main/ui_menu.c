@@ -5,6 +5,7 @@
 #include "provisioning.h"
 #include "airport.h"
 #include "audio.h"
+#include "radio.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -206,20 +207,43 @@ static void wifi_scan_cb(lv_event_t *e)
     open_page("WiFi scan", buf);
 }
 
+// Live IMU readout: an lv_timer re-reads the MPU9250 and updates the label.
+static lv_obj_t   *s_imu_label;
+static lv_timer_t *s_imu_timer;
+
+static void imu_update(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_imu_label) return;
+    imu_data_t d;
+    if (!imu_read(&d)) {
+        lv_label_set_text(s_imu_label, "MPU9250\nnot detected");
+        return;
+    }
+    lv_label_set_text_fmt(s_imu_label,
+        "Accel mg\n%d  %d  %d\nGyro dps\n%d  %d  %d\nTemp %d C",
+        (int)(d.ax * 1000), (int)(d.ay * 1000), (int)(d.az * 1000),
+        (int)d.gx, (int)d.gy, (int)d.gz, (int)d.temp_c);
+}
+
+static void sensors_back_cb(lv_event_t *e)
+{
+    if (s_imu_timer) { lv_timer_delete(s_imu_timer); s_imu_timer = NULL; }
+    s_imu_label = NULL;
+    back_cb(e);
+}
+
 static void sensors_cb(lv_event_t *e)
 {
     (void)e;
-    imu_data_t d;
-    char buf[160];
-    if (!imu_read(&d)) {
-        snprintf(buf, sizeof(buf), "MPU9250 not detected");
-    } else {
-        snprintf(buf, sizeof(buf),
-                 "Accel (mg)\n %d  %d  %d\nGyro (dps)\n %d  %d  %d\nTemp %d C",
-                 (int)(d.ax * 1000), (int)(d.ay * 1000), (int)(d.az * 1000),
-                 (int)d.gx, (int)d.gy, (int)d.gz, (int)d.temp_c);
-    }
-    open_page("Sensors", buf);
+    lv_obj_t *page = page_shell("Sensors");
+    s_imu_label = page_text(page, "Reading...");
+    imu_update(NULL);                                  // first sample now
+    s_imu_timer = lv_timer_create(imu_update, 150, NULL);  // then ~7 Hz
+
+    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", sensors_back_cb);
+    lv_screen_load(page);
+    lv_group_focus_obj(back);
 }
 
 static void board_info_cb(lv_event_t *e)
@@ -421,6 +445,42 @@ static void audio_clips_cb(lv_event_t *e)
     lv_group_focus_obj(first ? first : back);
 }
 
+// --- Internet radio (prototype) ---------------------------------------------
+
+static lv_obj_t   *s_radio_label;
+static lv_timer_t *s_radio_timer;
+
+static void radio_update(lv_timer_t *t)
+{
+    (void)t;
+    if (s_radio_label)
+        lv_label_set_text_fmt(s_radio_label, "Radio X\n\n%s\n\n" LV_SYMBOL_AUDIO " play/stop",
+                              radio_status());
+}
+
+static void radio_toggle_cb(lv_event_t *e) { (void)e; radio_toggle(); }
+
+static void radio_back_cb(lv_event_t *e)
+{
+    if (s_radio_timer) { lv_timer_delete(s_radio_timer); s_radio_timer = NULL; }
+    s_radio_label = NULL;                 // radio keeps playing in the background
+    back_cb(e);
+}
+
+static void radio_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *page = page_shell("Radio");
+    s_radio_label = page_text(page, "Radio X");
+    radio_update(NULL);
+    s_radio_timer = lv_timer_create(radio_update, 500, NULL);
+
+    lv_obj_t *play = page_button(page, LV_SYMBOL_AUDIO " Play / Stop", radio_toggle_cb);
+    page_button(page, LV_SYMBOL_LEFT " Back", radio_back_cb);
+    lv_screen_load(page);
+    lv_group_focus_obj(play);
+}
+
 static void reboot_cb(lv_event_t *e)
 {
     (void)e;
@@ -474,6 +534,7 @@ void ui_menu_start(void)
 
     // Actions -> sub-pages.
     make_button(scr, "ZRH Traffic " LV_SYMBOL_RIGHT, airport_cb);
+    make_button(scr, "Radio " LV_SYMBOL_RIGHT, radio_cb);
     make_button(scr, "Audio Clips " LV_SYMBOL_RIGHT, audio_clips_cb);
     make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
     make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
