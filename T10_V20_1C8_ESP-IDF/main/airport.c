@@ -15,6 +15,14 @@ static const char *TAG = "airport";
 
 typedef struct { char *buf; int len; } resp_t;
 
+// Null-safe integer field: 0 if missing or not a number (the API/response
+// shape could change -- never dereference a NULL cJSON item).
+static int jint(const cJSON *o, const char *key)
+{
+    const cJSON *i = cJSON_GetObjectItem(o, key);
+    return cJSON_IsNumber(i) ? i->valueint : 0;
+}
+
 static esp_err_t on_event(esp_http_client_event_t *e)
 {
     if (e->event_id == HTTP_EVENT_ON_DATA) {
@@ -72,10 +80,10 @@ int airport_fetch_hourly(int days, int hourly[24], int daycount[24], int *total)
         cJSON *hours = cJSON_GetObjectItem(end, "hours");
         cJSON *h;
         cJSON_ArrayForEach(h, hours) {
-            int hi = cJSON_GetObjectItem(h, "hour")->valueint;
-            int l  = cJSON_GetObjectItem(h, "landings")->valueint;
-            int t  = cJSON_GetObjectItem(h, "takeoffs")->valueint;
-            int d  = cJSON_GetObjectItem(h, "days")->valueint;
+            int hi = jint(h, "hour");
+            int l  = jint(h, "landings");
+            int t  = jint(h, "takeoffs");
+            int d  = jint(h, "days");
             if (hi >= 0 && hi < 24) {
                 hourly[hi] += l + t;
                 if (d > daycount[hi]) daycount[hi] = d;

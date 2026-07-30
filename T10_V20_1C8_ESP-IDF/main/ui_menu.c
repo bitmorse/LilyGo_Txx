@@ -1,10 +1,10 @@
 #include "ui_menu.h"
 #include "lvgl_port.h"
-#include "st7735.h"
 #include "wifi_scan.h"
 #include "imu.h"
 #include "provisioning.h"
 #include "airport.h"
+#include "audio.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -14,10 +14,6 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 
-// Settings state (RAM for the demo).
-static bool s_wifi_on = false;
-static int  s_mode = 0;               // 0=Auto 1=Day 2=Night
-
 // Main menu screen + its focusable widgets, so we can restore the encoder group
 // when returning from a sub-page.
 #define MAX_FOCUS 12
@@ -25,10 +21,18 @@ static lv_obj_t *s_main_scr;
 static lv_obj_t *s_focus[MAX_FOCUS];
 static int       s_focus_n;
 static lv_obj_t *s_page;              // current sub-page, or NULL
+static lv_obj_t *s_wifi_status;       // live WiFi status line on the home screen
+static lv_obj_t *s_wifi_bars;         // signal-strength bar container
+static lv_obj_t *s_bar[4];            // the 4 signal bars
+
+#define BAR_ON  0x37C8B4
+#define BAR_OFF 0x333A42
+
+static void page_focus_stop(lv_obj_t *o);   // fwd decl (defined below)
 
 static void group_add_main(lv_obj_t *o)
 {
-    lv_group_add_obj(lvgl_port_group(), o);
+    page_focus_stop(o);               // same scroll behaviour as sub-pages
     if (s_focus_n < MAX_FOCUS) s_focus[s_focus_n++] = o;
 }
 
@@ -46,6 +50,33 @@ static void back_cb(lv_event_t *e)
     if (s_page) { lv_obj_delete_async(s_page); s_page = NULL; }
 }
 
+// Register `o` as an encoder focus stop on a scrollable sub-page. Reusable on
+// every page: it fixes the recurring encoder-scroll pitfalls in one place --
+//   * the object must not be its own scroll container (else the encoder gets
+//     stuck scrolling inside it),
+//   * focusing it should scroll the page to bring it into view, and
+//   * focusing the FIRST stop scrolls to the very top so the title/header shows.
+#define PAGE_FOCUS_FLAG LV_OBJ_FLAG_USER_1
+
+static void page_focus_scroll_cb(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_target(e);
+    lv_obj_t *page = lv_obj_get_parent(o);
+    uint32_t idx = lv_obj_get_index(o);
+    for (uint32_t i = 0; i < idx; i++)
+        if (lv_obj_has_flag(lv_obj_get_child(page, i), PAGE_FOCUS_FLAG))
+            return;                     // not the first stop: default scroll is fine
+    lv_obj_scroll_to_y(page, 0, LV_ANIM_ON);   // first stop -> reveal the header
+}
+
+static void page_focus_stop(lv_obj_t *o)
+{
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS | PAGE_FOCUS_FLAG);
+    lv_obj_add_event_cb(o, page_focus_scroll_cb, LV_EVENT_FOCUSED, NULL);
+    lv_group_add_obj(lvgl_port_group(), o);
+}
+
 static lv_obj_t *page_button(lv_obj_t *page, const char *text, lv_event_cb_t cb)
 {
     lv_obj_t *b = lv_button_create(page);
@@ -54,7 +85,7 @@ static lv_obj_t *page_button(lv_obj_t *page, const char *text, lv_event_cb_t cb)
     lv_label_set_text(bl, text);
     lv_obj_center(bl);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
-    lv_group_add_obj(lvgl_port_group(), b);
+    page_focus_stop(b);
     return b;
 }
 
@@ -107,19 +138,57 @@ static void open_page(const char *title, const char *text)
 
 // --- widget / action handlers -----------------------------------------------
 
-static void wifi_switch_cb(lv_event_t *e)
+// Four signal bars of increasing height, aligned to the bottom.
+static lv_obj_t *make_wifi_bars(lv_obj_t *parent)
 {
-    s_wifi_on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    lv_obj_t *c = lv_obj_create(parent);
+    lv_obj_remove_style_all(c);
+    lv_obj_set_size(c, 20, 14);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(c, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_END);   // bars sit on a common baseline
+    lv_obj_set_style_pad_column(c, 1, 0);
+    for (int i = 0; i < 4; i++) {
+        s_bar[i] = lv_obj_create(c);
+        lv_obj_remove_style_all(s_bar[i]);
+        lv_obj_set_size(s_bar[i], 3, 4 + i * 3);   // 4, 7, 10, 13 px tall
+        lv_obj_set_style_radius(s_bar[i], 1, 0);
+        lv_obj_set_style_bg_opa(s_bar[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(s_bar[i], lv_color_hex(BAR_OFF), 0);
+    }
+    return c;
 }
 
-static void backlight_cb(lv_event_t *e)
+// Map RSSI (dBm) to how many of the 4 bars are lit (1..4 when connected).
+static int rssi_to_bars(int rssi)
 {
-    st7735_set_brightness(lv_spinbox_get_value(lv_event_get_target(e)));
+    if (rssi >= -55) return 4;
+    if (rssi >= -65) return 3;
+    if (rssi >= -73) return 2;
+    return 1;
 }
 
-static void mode_cb(lv_event_t *e)
+// Live WiFi status line + signal bars on the home screen, refreshed by a timer.
+static void wifi_status_update(lv_timer_t *t)
 {
-    s_mode = lv_dropdown_get_selected(lv_event_get_target(e));
+    (void)t;
+    if (!s_wifi_status) return;
+    if (provisioning_is_connected()) {
+        char ssid[33];
+        provisioning_ssid(ssid, sizeof(ssid));
+        lv_label_set_text_fmt(s_wifi_status, LV_SYMBOL_WIFI " %s",
+                              ssid[0] ? ssid : "connected");
+        lv_obj_set_style_text_color(s_wifi_status, lv_color_hex(0x37C8B4), 0);
+        int lit = rssi_to_bars(provisioning_rssi());
+        for (int i = 0; i < 4; i++)
+            lv_obj_set_style_bg_color(s_bar[i],
+                lv_color_hex(i < lit ? BAR_ON : BAR_OFF), 0);
+        lv_obj_remove_flag(s_wifi_bars, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_label_set_text(s_wifi_status, LV_SYMBOL_WIFI " offline");
+        lv_obj_set_style_text_color(s_wifi_status, lv_color_hex(0x8A93A0), 0);
+        lv_obj_add_flag(s_wifi_bars, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void wifi_scan_cb(lv_event_t *e)
@@ -181,9 +250,21 @@ static void wifi_setup_cb(lv_event_t *e)
     lv_obj_t *page = page_shell("WiFi Setup");
 
     if (st == PROV_PAIRING || st == PROV_IDLE) {
-        char buf[128];
-        snprintf(buf, sizeof(buf),
-                 "App: ESP BLE\nProvisioning\n\nDevice: %s\nPoP: %s",
+        // QR the "ESP BLE Provisioning" app can scan to auto-fill name + PoP.
+        lv_obj_t *qr = lv_qrcode_create(page);
+        lv_qrcode_set_size(qr, 88);
+        lv_qrcode_set_dark_color(qr, lv_color_black());
+        lv_qrcode_set_light_color(qr, lv_color_white());
+        char payload[96];
+        snprintf(payload, sizeof(payload),
+                 "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"ble\"}",
+                 provisioning_service_name(), provisioning_pop());
+        lv_qrcode_update(qr, payload, strlen(payload));
+        lv_obj_set_style_border_color(qr, lv_color_white(), 0);
+        lv_obj_set_style_border_width(qr, 3, 0);   // quiet zone for scanning
+
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s  PoP %s",
                  provisioning_service_name(), provisioning_pop());
         page_text(page, buf);
     } else {
@@ -196,7 +277,6 @@ static void wifi_setup_cb(lv_event_t *e)
     lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
     lv_screen_load(page);
     lv_group_focus_obj(back);
-    lv_obj_scroll_to_y(page, 0, LV_ANIM_OFF);   // keep the QR visible at the top
 }
 
 // --- ZRH airport traffic: hourly bars, Today vs Usual ----------------------
@@ -217,11 +297,7 @@ static lv_obj_t *make_hour_chart(lv_obj_t *parent, uint32_t color,
     lv_obj_set_style_pad_all(c, 2, 0);
     lv_obj_set_style_pad_column(c, 1, 0);       // thin gaps between bars
     lv_obj_set_scrollbar_mode(c, LV_SCROLLBAR_MODE_OFF);
-    // The chart must NOT be its own scroll container, or the encoder gets stuck
-    // trying to scroll inside it. Make it a plain focus stop that scrolls the page.
-    lv_obj_remove_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(c, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    lv_group_add_obj(lvgl_port_group(), c);
+    page_focus_stop(c);                          // encoder scroll stop (reusable)
     *ser_out = lv_chart_add_series(c, lv_color_hex(color), LV_CHART_AXIS_PRIMARY_Y);
     return c;
 }
@@ -304,6 +380,47 @@ static void airport_cb(lv_event_t *e)
     xTaskCreate(air_fetch_task, "air", 8192, (void *)(intptr_t)gen, 5, NULL);
 }
 
+// --- Audio clips (WAV playback via the DAC) ---------------------------------
+
+static lv_obj_t *s_audio_status;
+
+static void clip_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    audio_play(idx);
+    if (s_audio_status)
+        lv_label_set_text_fmt(s_audio_status, LV_SYMBOL_AUDIO " %s", audio_clip_name(idx));
+}
+
+static void audio_clips_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *page = page_shell("Audio Clips");
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+
+    int n = audio_clip_count();
+    lv_obj_t *first = NULL;
+    if (n == 0) {
+        page_text(page, "No clips.\nAdd .wav files to\naudio_clips/ then\n'make audio'.");
+    } else {
+        s_audio_status = page_text(page, "Press to play");
+        for (int i = 0; i < n; i++) {
+            lv_obj_t *b = lv_button_create(page);
+            lv_obj_set_width(b, lv_pct(100));
+            lv_obj_t *l = lv_label_create(b);
+            lv_label_set_text(l, audio_clip_name(i));
+            lv_obj_center(l);
+            lv_obj_add_event_cb(b, clip_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+            page_focus_stop(b);
+            if (!first) first = b;
+        }
+    }
+
+    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
+    lv_screen_load(page);
+    lv_group_focus_obj(first ? first : back);
+}
+
 static void reboot_cb(lv_event_t *e)
 {
     (void)e;
@@ -311,20 +428,6 @@ static void reboot_cb(lv_event_t *e)
 }
 
 // --- main menu builders -----------------------------------------------------
-
-static lv_obj_t *make_row(lv_obj_t *parent, const char *name)
-{
-    lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(row, 2, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_t *lbl = lv_label_create(row);
-    lv_label_set_text(lbl, name);
-    return row;
-}
 
 static void make_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
 {
@@ -348,44 +451,35 @@ void ui_menu_start(void)
     lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(scr, 4, 0);
-    lv_obj_set_style_pad_row(scr, 4, 0);
+    lv_obj_set_style_pad_row(scr, 3, 0);
+    lv_obj_set_scroll_dir(scr, LV_DIR_VER);
 
     lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "Settings");
+    lv_label_set_text(title, "T10 V2.0");
     lv_obj_set_style_text_color(title, lv_color_hex(0x37C8B4), 0);
 
-    // WiFi switch
-    lv_obj_t *row = make_row(scr, "WiFi");
-    lv_obj_t *sw = lv_switch_create(row);
-    lv_obj_add_event_cb(sw, wifi_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    group_add_main(sw);
+    // Live WiFi status + signal bars (replaces the old no-op WiFi switch).
+    lv_obj_t *wrow = lv_obj_create(scr);
+    lv_obj_remove_style_all(wrow);
+    lv_obj_set_size(wrow, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(wrow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wrow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_END);
+    lv_obj_set_style_pad_column(wrow, 5, 0);
+    s_wifi_status = lv_label_create(wrow);
+    lv_obj_set_style_text_font(s_wifi_status, &lv_font_montserrat_14, 0);
+    s_wifi_bars = make_wifi_bars(wrow);
+    wifi_status_update(NULL);
+    lv_timer_create(wifi_status_update, 2000, NULL);
 
-    // Backlight spinbox (0..100, live PWM)
-    row = make_row(scr, "Light");
-    lv_obj_t *sb = lv_spinbox_create(row);
-    lv_spinbox_set_range(sb, 0, 100);
-    lv_spinbox_set_digit_format(sb, 3, 0);
-    lv_spinbox_set_step(sb, 5);
-    lv_spinbox_set_value(sb, 100);
-    lv_obj_set_width(sb, 54);
-    lv_obj_add_event_cb(sb, backlight_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    group_add_main(sb);
-
-    // Mode dropdown
-    row = make_row(scr, "Mode");
-    lv_obj_t *dd = lv_dropdown_create(row);
-    lv_dropdown_set_options(dd, "Auto\nDay\nNight");
-    lv_obj_set_width(dd, 70);
-    lv_obj_add_event_cb(dd, mode_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    group_add_main(dd);
-
-    // Action buttons -> open sub-pages
+    // Actions -> sub-pages.
+    make_button(scr, "ZRH Traffic " LV_SYMBOL_RIGHT, airport_cb);
+    make_button(scr, "Audio Clips " LV_SYMBOL_RIGHT, audio_clips_cb);
+    make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
+    make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
+    make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Setup WiFi " LV_SYMBOL_RIGHT, wifi_setup_cb);
     make_button(scr, "Forget WiFi", repair_cb);
-    make_button(scr, "ZRH Traffic " LV_SYMBOL_RIGHT, airport_cb);
-    make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
-    make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
-    make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Reboot", reboot_cb);
 
     if (s_focus_n) lv_group_focus_obj(s_focus[0]);

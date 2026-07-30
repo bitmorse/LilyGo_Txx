@@ -27,7 +27,7 @@ PORT ?= $(shell ls /dev/cu.SLAB_USBtoUART /dev/cu.usbserial* /dev/cu.wchusbseria
 # Source the IDF environment and run idf.py in a single shell invocation.
 IDF = source "$(IDF_PATH)/export.sh" >/dev/null 2>&1 && idf.py
 
-.PHONY: default all setup check venv boot-image build flash monitor flash-monitor menuconfig erase clean fullclean size port help
+.PHONY: default all setup check venv boot-image audio sdkconfig-sync build flash monitor flash-monitor menuconfig erase clean fullclean size port help
 
 default: build
 
@@ -80,18 +80,38 @@ boot-image:
 		python3 tools/gen_default_boot.py -o "$(BOOT_HDR)"; \
 	fi
 
+## --- audio clips -----------------------------------------------------------
+
+# Convert audio_clips/*.wav -> main/audio_clips.h (8-bit 16 kHz mono) on every
+# build. The WAVs and the generated header are gitignored (per-user content).
+AUDIO_DIR := audio_clips
+AUDIO_HDR := main/audio_clips.h
+
+audio:
+	@mkdir -p "$(AUDIO_DIR)"
+	@python3 tools/wav2c.py "$(AUDIO_DIR)" -o "$(AUDIO_HDR)"
+
 ## --- build / flash ---------------------------------------------------------
 
-build: check boot-image
+# ESP-IDF only applies sdkconfig.defaults when sdkconfig is absent. If the
+# defaults changed, drop sdkconfig so the new values take effect (no manual
+# `rm -f sdkconfig` dance).
+sdkconfig-sync:
+	@if [ -f sdkconfig ] && [ sdkconfig.defaults -nt sdkconfig ]; then \
+		echo "sdkconfig.defaults changed -> regenerating sdkconfig"; \
+		rm -f sdkconfig; \
+	fi
+
+build: check sdkconfig-sync boot-image audio
 	@$(IDF) build
 
-flash: check boot-image port-check
+flash: check sdkconfig-sync boot-image audio port-check
 	@$(IDF) -p "$(PORT)" flash
 
 monitor: check port-check
 	@$(IDF) -p "$(PORT)" monitor
 
-flash-monitor: check boot-image port-check
+flash-monitor: check sdkconfig-sync boot-image audio port-check
 	@$(IDF) -p "$(PORT)" flash monitor
 
 menuconfig: check

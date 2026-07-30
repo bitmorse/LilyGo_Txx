@@ -44,18 +44,18 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 
 static void encoder_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    static int prev_prev = 0, prev_next = 0;   // edge state for BTN1/BTN2
+    static int prev_up = 0, prev_down = 0;   // edge state for BTN2/BTN3
     (void)indev;
 
-    int b_prev  = buttons_level(BTN_1);   // left   -> rotate back
-    int b_next  = buttons_level(BTN_2);   // middle -> rotate forward
-    int b_enter = buttons_level(BTN_3);   // right  -> push (enter/edit)
+    int b_enter = buttons_level(BTN_1);   // left   -> enter / press
+    int b_up    = buttons_level(BTN_2);   // middle -> up    (rotate back)
+    int b_down  = buttons_level(BTN_3);   // right  -> down  (rotate forward)
 
     int diff = 0;
-    if (b_prev && !prev_prev) diff -= 1;
-    if (b_next && !prev_next) diff += 1;
-    prev_prev = b_prev;
-    prev_next = b_next;
+    if (b_up   && !prev_up)   diff -= 1;
+    if (b_down && !prev_down) diff += 1;
+    prev_up = b_up;
+    prev_down = b_down;
 
     data->enc_diff = diff;
     data->state = b_enter ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;

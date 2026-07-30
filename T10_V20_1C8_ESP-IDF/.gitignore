@@ -14,3 +14,7 @@ main/boot_image.h
 
 # uv venv used for the image conversion (recreated by `make`).
 .venv/
+
+# Your WAV clips + the header the build generates from them (per-user content).
+audio_clips/
+main/audio_clips.h

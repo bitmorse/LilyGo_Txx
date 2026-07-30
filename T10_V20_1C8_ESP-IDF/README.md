@@ -9,12 +9,12 @@ What it does once flashed:
 - **Boot image** shown full-screen on the TFT, held until you press any button,
   with a **cute chiptune melody** played through the speaker on boot
 - An **LVGL 9** GUI with a settings menu, driven by the 3 buttons as an encoder:
-  - **BTN1** (GPIO35) = back / move up  (encoder rotate −)
-  - **BTN2** (GPIO34) = forward / move down (encoder rotate +)
-  - **BTN3** (GPIO39) = select / edit (encoder press)
-  - Fields: **WiFi switch**, **backlight number** (spinbox, live PWM),
-    **mode dropdown**, and actions (**WiFi scan**, **Sensors**, **Board info**,
-    **Reboot**).
+  - **BTN1** (GPIO35) = enter / select (encoder press)
+  - **BTN2** (GPIO34) = up (encoder rotate −)
+  - **BTN3** (GPIO39) = down (encoder rotate +)
+  - Home screen: **live WiFi status**, a **brightness slider** (live PWM), and
+    action items — **ZRH Traffic**, **Sensors**, **WiFi scan**, **Board info**,
+    **Setup WiFi**, **Forget WiFi**, **Reboot** — each opening a sub-page.
 
   > Note: this unit wires the buttons to GPIO **35 / 34 / 39** — the LilyGO repo's
   > Arduino header claims 36/37/39, which is wrong for this board revision.
@@ -163,6 +163,21 @@ doesn't freeze, and the page invalidates any in-flight fetch when you press Back
   cJSON to sum landings+takeoffs across all runway ends into `hourly[24]`, with a
   per-hour day count so "usual" = total / days.
 - Data: `https://bitmorse.com/airports-api/LSZH/movements?days=N`.
+
+## Audio clips (WAV playback)
+
+Drop short **`.wav`** files into **`audio_clips/`** and they play through the
+speaker (GPIO25 DAC) from the **Audio Clips** menu page — one button per clip,
+press to play once.
+
+- Any WAV (rate/width/mono-stereo) is converted to **8-bit 16 kHz mono** and
+  embedded in flash by `tools/wav2c.py`, run on **every `make` / `make audio`**.
+- `audio_clips/` and the generated `main/audio_clips.h` are **gitignored**
+  (per-user content); with no clips the page just says "No clips".
+- `main/audio.c` streams the PCM via `dac_continuous` in a background task.
+
+> The boot melody uses LEDC on the same GPIO25; the first clip playback resets
+> the pin so the DAC takes over (tones are boot-only, so this is a one-way handoff).
 
 ## GUI / menu (LVGL 9)
 

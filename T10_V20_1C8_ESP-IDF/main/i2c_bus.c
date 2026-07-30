@@ -5,8 +5,10 @@
 #include <stdio.h>
 #include "esp_log.h"
 
-#define I2C_SDA 21
-#define I2C_SCL 22
+// This board wires I2C to GPIO19 (SDA) / GPIO18 (SCL) -- the MPU9250 responds at
+// 0x68 there (confirmed by the boot sweep). The repo's header claims 21/22.
+#define I2C_SDA 19
+#define I2C_SCL 18
 
 static const char *TAG = "i2c";
 static i2c_master_bus_handle_t s_bus = NULL;

@@ -19,13 +19,29 @@ static const char *TAG = "prov";
 
 static prov_state_t s_state = PROV_IDLE;
 static char s_service_name[20] = "T10_????";
-static char s_qr[96];
 static int  s_retries = 0;
 
 prov_state_t provisioning_state(void)        { return s_state; }
 const char  *provisioning_service_name(void) { return s_service_name; }
 const char  *provisioning_pop(void)          { return PROV_POP; }
-const char  *provisioning_qr_payload(void)   { return s_qr; }
+bool         provisioning_is_connected(void) { return s_state == PROV_CONNECTED; }
+
+void provisioning_ssid(char *buf, int n)
+{
+    wifi_config_t cfg;
+    if (n <= 0) return;
+    buf[0] = '\0';
+    if (esp_wifi_get_config(WIFI_IF_STA, &cfg) == ESP_OK)
+        snprintf(buf, n, "%s", (char *)cfg.sta.ssid);
+}
+
+int provisioning_rssi(void)
+{
+    wifi_ap_record_t ap;
+    if (s_state == PROV_CONNECTED && esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+        return ap.rssi;
+    return 0;
+}
 
 // --- event handling ---------------------------------------------------------
 
@@ -79,10 +95,6 @@ static void make_service_name(void)
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     snprintf(s_service_name, sizeof(s_service_name), "T10_%02X%02X%02X",
              mac[3], mac[4], mac[5]);
-    // Payload the ESP BLE Provisioning app expects from a QR scan.
-    snprintf(s_qr, sizeof(s_qr),
-             "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"ble\"}",
-             s_service_name, PROV_POP);
 }
 
 // --- public -----------------------------------------------------------------
@@ -151,5 +163,8 @@ static void reset_task(void *arg)
 
 void provisioning_reset_and_restart(void)
 {
+    static volatile bool started = false;
+    if (started) return;                 // ignore repeat presses; reboot is coming
+    started = true;
     xTaskCreate(reset_task, "prov_reset", 4096, NULL, 5, NULL);
 }

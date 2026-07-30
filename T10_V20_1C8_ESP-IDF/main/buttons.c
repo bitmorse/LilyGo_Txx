@@ -5,7 +5,6 @@
 // Actual button-to-GPIO wiring on this T10 V2.0 unit (found empirically; the
 // repo's Arduino header lists 36/37/39, which is wrong for this revision).
 static const int s_pins[3] = { 35, 34, 39 };
-static int s_last[3] = { 1, 1, 1 };   // released = high
 
 void buttons_init(void)
 {
@@ -20,21 +19,6 @@ void buttons_init(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io);
-
-    for (int i = 0; i < 3; i++) s_last[i] = gpio_get_level(s_pins[i]);
-}
-
-int buttons_poll(void)
-{
-    int pressed = 0;
-    for (int i = 0; i < 3; i++) {
-        int lvl = gpio_get_level(s_pins[i]);
-        if (lvl == 0 && s_last[i] == 1) {      // high -> low edge = new press
-            pressed |= (1 << i);
-        }
-        s_last[i] = lvl;
-    }
-    return pressed;
 }
 
 int buttons_level(int idx)

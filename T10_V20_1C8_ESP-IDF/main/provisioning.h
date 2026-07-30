@@ -21,7 +21,10 @@ void provisioning_init(void);
 prov_state_t provisioning_state(void);
 const char  *provisioning_service_name(void);   // BLE device name shown in the app
 const char  *provisioning_pop(void);            // proof-of-possession code
-const char  *provisioning_qr_payload(void);     // JSON for the app's QR scanner
+
+bool provisioning_is_connected(void);           // WiFi connected (has IP)
+void provisioning_ssid(char *buf, int n);       // connected SSID (empty if none)
+int  provisioning_rssi(void);                    // AP signal in dBm (0 if not connected)
 
 // Erase stored credentials and reboot into BLE pairing mode ("Setup WiFi" again).
 void provisioning_reset_and_restart(void);
