@@ -203,3 +203,14 @@ void provisioning_reset_and_restart(void)
     started = true;
     xTaskCreate(reset_task, "prov_reset", 4096, NULL, 5, NULL);
 }
+
+void provisioning_stop_ble(void)
+{
+    // Only meaningful while advertising for pairing; if already provisioned the
+    // BLE stack was released after connect, so there's nothing to stop.
+    if (s_state == PROV_PAIRING || s_state == PROV_IDLE) {
+        ESP_LOGI(TAG, "stopping BLE provisioning for SoftAP file sync");
+        wifi_prov_mgr_stop_provisioning();
+        s_state = PROV_IDLE;
+    }
+}

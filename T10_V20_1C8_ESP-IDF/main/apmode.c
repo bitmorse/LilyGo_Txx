@@ -49,6 +49,11 @@ bool apmode_start(char *ssid, int ssid_cap, char *pass, int pass_cap)
     make_ssid(ssid, ssid_cap);
     make_pass(pass, pass_cap);
 
+    // SoftAP + active BLE advertising is unstable on the classic ESP32 (the BLE
+    // events interrupt the Wi-Fi transfer -> mid-stream drops). Stop provisioning
+    // BLE before bringing the AP up.
+    provisioning_stop_ble();
+
     if (s_ap_netif == NULL) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
         esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, ap_event, NULL);

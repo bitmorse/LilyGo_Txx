@@ -75,3 +75,12 @@ CONFIG_FREERTOS_HZ=1000
 # FATFS long filenames so "vibNNNN.mcap" (4-char extension) is allowed.
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=64
+
+# --- File-sync HTTP throughput ---------------------------------------------
+# The default 5760-byte TCP send/receive buffers stall the ESP32 after ~5.7 KB
+# waiting for the peer's delayed ACK -> ~6 KB/s. Larger buffers keep much more
+# data in flight. These are per-connection (allocated from heap at connect), so
+# they cost nothing at boot and File Sync mode has ample free heap.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576
+CONFIG_LWIP_TCP_WND_DEFAULT=24576
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
