@@ -7,6 +7,9 @@
 #include "audio.h"
 #include "radio.h"
 #include "viblog.h"
+#include "apmode.h"
+#include "filesrv.h"
+#include "settings.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -18,7 +21,7 @@
 
 // Main menu screen + its focusable widgets, so we can restore the encoder group
 // when returning from a sub-page.
-#define MAX_FOCUS 12
+#define MAX_FOCUS 16
 static lv_obj_t *s_main_scr;
 static lv_obj_t *s_focus[MAX_FOCUS];
 static int       s_focus_n;
@@ -572,6 +575,84 @@ static void vib_cb(lv_event_t *e)
     (void)back;
 }
 
+// --- File Sync (SoftAP direct transfer) -------------------------------------
+
+static lv_obj_t   *s_ap_label;
+static lv_timer_t *s_ap_timer;
+static char        s_ap_ssid[20], s_ap_pass[16];
+
+static void ap_update(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_ap_label) return;
+    lv_label_set_text_fmt(s_ap_label,
+        "Join WiFi:\n%s\npass: %s\n\nhttp://192.168.4.1:8080\n\nclients: %d",
+        s_ap_ssid, s_ap_pass, apmode_clients());
+}
+
+static void filesync_back_cb(lv_event_t *e)
+{
+    if (s_ap_timer) { lv_timer_delete(s_ap_timer); s_ap_timer = NULL; }
+    s_ap_label = NULL;
+    filesrv_stop();                      // stop HTTP server (SD stays mounted)
+    apmode_stop();                       // revert to home Wi-Fi
+    back_cb(e);
+}
+
+static void filesync_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *page = page_shell("File Sync");
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+
+    if (apmode_start(s_ap_ssid, sizeof(s_ap_ssid), s_ap_pass, sizeof(s_ap_pass))) {
+        filesrv_start();                 // HTTP file server on the SoftAP (on demand)
+        s_ap_label = page_text(page, "...");
+        ap_update(NULL);
+        s_ap_timer = lv_timer_create(ap_update, 1000, NULL);
+    } else {
+        page_text(page, "SoftAP failed\nto start.");
+    }
+
+    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Stop & Back", filesync_back_cb);
+    lv_screen_load(page);
+    lv_group_focus_obj(back);
+}
+
+// --- Settings ---------------------------------------------------------------
+
+static lv_obj_t *s_bootsnd_lbl;
+
+static void boot_sound_cb(lv_event_t *e)
+{
+    (void)e;
+    bool on = !settings_boot_sound();
+    settings_set_boot_sound(on);
+    if (s_bootsnd_lbl)
+        lv_label_set_text_fmt(s_bootsnd_lbl, "Boot sound: %s", on ? "ON" : "OFF");
+}
+
+static void settings_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *page = page_shell("Settings");
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+
+    lv_obj_t *b = lv_button_create(page);          // toggle button (press to flip)
+    lv_obj_set_width(b, lv_pct(100));
+    s_bootsnd_lbl = lv_label_create(b);
+    lv_label_set_text_fmt(s_bootsnd_lbl, "Boot sound: %s",
+                          settings_boot_sound() ? "ON" : "OFF");
+    lv_obj_center(s_bootsnd_lbl);
+    lv_obj_add_event_cb(b, boot_sound_cb, LV_EVENT_CLICKED, NULL);
+    page_focus_stop(b);
+
+    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
+    lv_screen_load(page);
+    lv_group_focus_obj(b);
+    (void)back;
+}
+
 static void reboot_cb(lv_event_t *e)
 {
     (void)e;
@@ -629,9 +710,11 @@ void ui_menu_start(void)
     make_button(scr, "Audio Clips " LV_SYMBOL_RIGHT, audio_clips_cb);
     make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
     make_button(scr, "Vibration Log " LV_SYMBOL_RIGHT, vib_cb);
+    make_button(scr, "File Sync " LV_SYMBOL_RIGHT, filesync_cb);
     make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
     make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Setup WiFi " LV_SYMBOL_RIGHT, wifi_setup_cb);
+    make_button(scr, "Settings " LV_SYMBOL_RIGHT, settings_cb);
     make_button(scr, "Forget WiFi", repair_cb);
     make_button(scr, "Reboot", reboot_cb);
 

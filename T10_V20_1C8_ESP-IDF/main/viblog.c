@@ -305,7 +305,7 @@ fail:
     for (int f = 0; f < AUX_FLOATS; f++) { free(s_aux[f]); s_aux[f] = NULL; }
     if (s_fp) { fclose(s_fp); s_fp = NULL; }
     imu_hires_stop();
-    sd_unmount();
+    // SD stays mounted (owned globally, mounted once at boot) — never unmount here.
     return false;
 }
 
@@ -321,7 +321,7 @@ void viblog_stop(void)
     imu_hires_stop();
     if (s_sb) { vStreamBufferDelete(s_sb); s_sb = NULL; }
     if (s_aux_sb) { vStreamBufferDelete(s_aux_sb); s_aux_sb = NULL; }
-    sd_unmount();
+    // SD stays mounted (owned globally) — the file server keeps using it.
     ESP_LOGI(TAG, "stopped");
 }
 

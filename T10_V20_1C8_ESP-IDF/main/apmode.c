@@ -1,0 +1,90 @@
+#include "apmode.h"
+#include "provisioning.h"
+
+#include <string.h>
+#include <stdio.h>
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_mac.h"
+#include "esp_random.h"
+#include "esp_event.h"
+#include "esp_log.h"
+
+static const char *TAG = "apmode";
+
+#define AP_CHANNEL   1
+#define AP_MAX_CONN  4
+
+static esp_netif_t   *s_ap_netif;
+static volatile bool  s_active;
+static volatile int   s_clients;
+
+bool apmode_active(void)  { return s_active; }
+int  apmode_clients(void) { return s_clients; }
+
+static void ap_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)data;
+    if (id == WIFI_EVENT_AP_STACONNECTED)    { s_clients++; ESP_LOGI(TAG, "client joined (%d)", s_clients); }
+    else if (id == WIFI_EVENT_AP_STADISCONNECTED) { if (s_clients > 0) s_clients--; ESP_LOGI(TAG, "client left (%d)", s_clients); }
+}
+
+static void make_ssid(char *out, int cap)
+{
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    snprintf(out, cap, "Octanis-%02X%02X", mac[4], mac[5]);
+}
+
+// DEV: a fixed WPA2 passphrase so the test laptop remembers the SoftAP and we
+// don't retype it each boot. Swap back to a random per-session passphrase
+// (delivered over the encrypted BLE handoff) before release (task #25).
+static void make_pass(char *out, int cap)
+{
+    snprintf(out, cap, "octanis123");
+}
+
+bool apmode_start(char *ssid, int ssid_cap, char *pass, int pass_cap)
+{
+    make_ssid(ssid, ssid_cap);
+    make_pass(pass, pass_cap);
+
+    if (s_ap_netif == NULL) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, ap_event, NULL);
+        esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, ap_event, NULL);
+    }
+
+    wifi_config_t apcfg = {
+        .ap = {
+            .channel        = AP_CHANNEL,
+            .max_connection = AP_MAX_CONN,
+            .authmode       = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg        = { .required = false },
+        },
+    };
+    snprintf((char *)apcfg.ap.ssid, sizeof(apcfg.ap.ssid), "%s", ssid);
+    apcfg.ap.ssid_len = strlen((char *)apcfg.ap.ssid);
+    snprintf((char *)apcfg.ap.password, sizeof(apcfg.ap.password), "%s", pass);
+
+    s_clients = 0;
+    if (esp_wifi_set_mode(WIFI_MODE_AP) != ESP_OK) return false;
+    if (esp_wifi_set_config(WIFI_IF_AP, &apcfg) != ESP_OK) return false;
+    esp_wifi_start();                          // no-op if already started
+    esp_wifi_set_ps(WIFI_PS_NONE);             // responsive server
+
+    s_active = true;
+    ESP_LOGI(TAG, "SoftAP up: SSID=%s pass=%s  http://192.168.4.1:8080", ssid, pass);
+    return true;
+}
+
+void apmode_stop(void)
+{
+    if (!s_active) return;
+    s_active = false;
+    s_clients = 0;
+    // Back to STA and rejoin the provisioned home network.
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_connect();
+    ESP_LOGI(TAG, "SoftAP down, reconnecting to home Wi-Fi");
+}

@@ -16,10 +16,15 @@ idf_component_register(
         "mcap.c"
         "accel_encode.c"
         "viblog.c"
+        "manifest.c"
+        "filesrv.c"
+        "apmode.c"
+        "settings.c"
         "lvgl_port.c"
         "ui_menu.c"
     INCLUDE_DIRS "."
     REQUIRES driver esp_wifi esp_netif esp_event nvs_flash esp_timer spi_flash esp_partition
              wifi_provisioning bt esp_http_client esp-tls json esp_driver_dac
              esp-libhelix-mp3 lvgl fatfs sdmmc esp_driver_sdspi esp_driver_spi
+             esp_http_server mdns mbedtls esp_app_format
 )
