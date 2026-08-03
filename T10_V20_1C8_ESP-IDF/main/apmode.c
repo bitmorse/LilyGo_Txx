@@ -10,6 +10,7 @@
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_event.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 
 static const char *TAG = "apmode";
@@ -20,15 +21,26 @@ static const char *TAG = "apmode";
 static esp_netif_t   *s_ap_netif;
 static volatile bool  s_active;
 static volatile int   s_clients;
+static volatile int64_t s_last_client_ms;      // last time a client was present
+
+static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
 bool apmode_active(void)  { return s_active; }
 int  apmode_clients(void) { return s_clients; }
 
+// Milliseconds with zero clients connected (0 while a client is present). Used by
+// the sync-session watchdog to tear the AP down if nobody uses it.
+int64_t apmode_no_client_ms(void)
+{
+    if (!s_active || s_clients > 0) return 0;
+    return now_ms() - s_last_client_ms;
+}
+
 static void ap_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)base; (void)data;
-    if (id == WIFI_EVENT_AP_STACONNECTED)    { s_clients++; ESP_LOGI(TAG, "client joined (%d)", s_clients); }
-    else if (id == WIFI_EVENT_AP_STADISCONNECTED) { if (s_clients > 0) s_clients--; ESP_LOGI(TAG, "client left (%d)", s_clients); }
+    if (id == WIFI_EVENT_AP_STACONNECTED)    { s_clients++; s_last_client_ms = now_ms(); ESP_LOGI(TAG, "client joined (%d)", s_clients); }
+    else if (id == WIFI_EVENT_AP_STADISCONNECTED) { if (s_clients > 0) s_clients--; s_last_client_ms = now_ms(); ESP_LOGI(TAG, "client left (%d)", s_clients); }
 }
 
 static void make_ssid(char *out, int cap)
@@ -83,6 +95,7 @@ bool apmode_start(char *ssid, int ssid_cap, char *pass, int pass_cap)
     esp_wifi_start();                          // no-op if already started
     esp_wifi_set_ps(WIFI_PS_NONE);             // responsive server
 
+    s_last_client_ms = now_ms();               // start the no-client teardown clock
     s_active = true;
     ESP_LOGI(TAG, "SoftAP up: SSID=%s pass=%s  http://192.168.4.1:8080", ssid, pass);
     return true;

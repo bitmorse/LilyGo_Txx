@@ -20,3 +20,6 @@ void apmode_stop(void);
 
 bool apmode_active(void);
 int  apmode_clients(void);      // number of stations currently associated
+
+#include <stdint.h>
+int64_t apmode_no_client_ms(void);   // ms with zero clients (0 if a client is on)

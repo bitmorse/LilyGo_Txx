@@ -29,6 +29,8 @@
 #include "ui_menu.h"
 #include "settings.h"
 #include "blesync.h"
+#include "apmode.h"
+#include "filesrv.h"
 #include "boot_image.h"
 
 static const char *TAG = "app";
@@ -69,6 +71,17 @@ void app_main(void)
     int64_t last_beat = 0;
     while (1) {
         int64_t now = esp_timer_get_time();
+
+        // Sync-session watchdog: if a SoftAP was raised (via BLE or the menu) but
+        // nobody joined for 2 min, or there's been no HTTP traffic for 5 min, tear
+        // it down and return to the SYNC_IDLE state (BLE advertising, Wi-Fi idle).
+        if (apmode_active() &&
+            (apmode_no_client_ms() > 120000 || filesrv_idle_ms() > 300000)) {
+            ESP_LOGW(TAG, "SoftAP unused -> teardown to sync-idle");
+            filesrv_stop();
+            apmode_stop();
+        }
+
         if (now - last_beat > 5 * 1000 * 1000) {   // every 5 s
             last_beat = now;
             wifi_ap_record_t ap;

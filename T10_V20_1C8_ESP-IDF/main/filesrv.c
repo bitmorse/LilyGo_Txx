@@ -28,6 +28,16 @@ static const char *TAG = "filesrv";
 static httpd_handle_t s_srv;
 static char           s_token[33];       // 32 hex + NUL; empty = no valid session
 static uint8_t        s_sendbuf[8192];   // shared send buffer (httpd = 1 req at a time)
+static volatile int64_t s_last_activity_ms;
+
+static void touch(void) { s_last_activity_ms = esp_timer_get_time() / 1000; }
+
+// ms since the last HTTP request (0 if the server isn't running). For the watchdog.
+int64_t filesrv_idle_ms(void)
+{
+    if (!s_srv) return 0;
+    return esp_timer_get_time() / 1000 - s_last_activity_ms;
+}
 
 const char *filesrv_token(void) { return s_token; }
 bool filesrv_running(void)      { return s_srv != NULL; }
@@ -52,6 +62,7 @@ static void softap_ssid(char *out, int cap)
 
 static bool auth_ok(httpd_req_t *req)
 {
+    touch();                                       // any request counts as activity
     if (s_token[0] == '\0') return false;
     // "Authorization: Bearer <token>" header (the app uses this).
     char h[64];
@@ -85,6 +96,7 @@ static int id_from_uri(const char *uri)   // ".../file/7" -> 7
 // GET /info -- UNAUTHENTICATED reachability + capability probe (no file contents).
 static esp_err_t h_info(httpd_req_t *req)
 {
+    touch();
     char ssid[20];
     softap_ssid(ssid, sizeof(ssid));
 
@@ -298,6 +310,7 @@ bool filesrv_start(void)
         httpd_register_uri_handler(s_srv, &routes[i]);
 
     new_token();
+    touch();                                   // reset the idle clock at start
 
     // A sleeping STA drops inbound unicast (the server becomes unreachable while
     // mDNS multicast still works). Keep the radio awake while serving files.
