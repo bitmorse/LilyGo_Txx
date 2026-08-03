@@ -60,9 +60,14 @@ CONFIG_ESP_WIFI_IRAM_OPT=n
 CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 # Move rarely-used FreeRTOS functions to flash.
 CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
-# Trim WiFi static RX buffers a little (DRAM).
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+# WiFi RX/TX buffers + AMPDU aggregation window. The earlier tiny values
+# (STATIC_RX=4, RX_BA_WIN=6) crippled SoftAP throughput to ~10 KB/s. These are the
+# affordable "high-throughput" rank for an internal-RAM ESP32 (RX_BA_WIN must be
+# <= 2*STATIC_RX and <= DYNAMIC_RX). Costs ~10 KB DRAM at boot.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_RX_BA_WIN=16
 
 # HTTPS: use the built-in CA certificate bundle (for the ZRH traffic fetch).
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
@@ -77,10 +82,11 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=64
 
 # --- File-sync HTTP throughput ---------------------------------------------
-# The default 5760-byte TCP send/receive buffers stall the ESP32 after ~5.7 KB
-# waiting for the peer's delayed ACK -> ~6 KB/s. Larger buffers keep much more
-# data in flight. These are per-connection (allocated from heap at connect), so
-# they cost nothing at boot and File Sync mode has ample free heap.
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576
-CONFIG_LWIP_TCP_WND_DEFAULT=24576
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
+# macOS delays TCP ACKs ~200 ms unless >=2 full segments arrive, which stalls the
+# transfer at ~1 segment/RTT (~5-6 KB/s) regardless of window size. A max send
+# buffer lets lwIP keep a full window in flight so >=2 segments arrive together
+# and macOS acks immediately. (The real client is a phone app, where this
+# macOS-specific behaviour doesn't apply.) Per-connection, no boot RAM cost.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=24

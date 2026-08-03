@@ -3,6 +3,8 @@
 
 #include <string.h>
 #include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_mac.h"
@@ -51,8 +53,11 @@ bool apmode_start(char *ssid, int ssid_cap, char *pass, int pass_cap)
 
     // SoftAP + active BLE advertising is unstable on the classic ESP32 (the BLE
     // events interrupt the Wi-Fi transfer -> mid-stream drops). Stop provisioning
-    // BLE before bringing the AP up.
+    // BLE before bringing the AP up. The manager stop is ASYNC and its teardown
+    // flips Wi-Fi back to STA + releases BT ~1 s later, which would clobber our AP
+    // if we set AP mode first -- so wait it out here (this runs off the UI task).
     provisioning_stop_ble();
+    vTaskDelay(pdMS_TO_TICKS(1500));
 
     if (s_ap_netif == NULL) {
         s_ap_netif = esp_netif_create_default_wifi_ap();

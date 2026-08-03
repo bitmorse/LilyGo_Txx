@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include "esp_vfs_fat.h"
 #include "mbedtls/sha256.h"
@@ -98,20 +100,22 @@ static bool compute_sha256(const char *path, char *hex)
     long remaining = (long)st.st_size;                  // bound the read: a corrupt
                                                         // FAT cluster loop must not
                                                         // spin forever here.
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
+    // POSIX open/read, NOT stdio: newlib's tiny default file buffer makes fread
+    // ~15x slower off SD (each read becomes many tiny SD transactions).
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
 
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);                     // 0 = SHA-256 (HW accel)
 
-    uint8_t buf[1024];
-    size_t r;
-    while (remaining > 0 && (r = fread(buf, 1, sizeof(buf), f)) > 0) {
+    uint8_t buf[2048];                                  // stack (compute can run on 2 tasks)
+    ssize_t r;
+    while (remaining > 0 && (r = read(fd, buf, sizeof(buf))) > 0) {
         mbedtls_sha256_update(&ctx, buf, r);
         remaining -= (long)r;
     }
-    fclose(f);
+    close(fd);
 
     uint8_t out[32];
     mbedtls_sha256_finish(&ctx, out);

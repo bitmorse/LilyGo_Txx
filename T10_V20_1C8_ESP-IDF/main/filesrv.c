@@ -6,6 +6,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "esp_http_server.h"
 #include "esp_random.h"
 #include "esp_mac.h"
@@ -25,6 +27,7 @@ static const char *TAG = "filesrv";
 
 static httpd_handle_t s_srv;
 static char           s_token[33];       // 32 hex + NUL; empty = no valid session
+static uint8_t        s_sendbuf[8192];   // shared send buffer (httpd = 1 req at a time)
 
 const char *filesrv_token(void) { return s_token; }
 bool filesrv_running(void)      { return s_srv != NULL; }
@@ -50,10 +53,18 @@ static void softap_ssid(char *out, int cap)
 static bool auth_ok(httpd_req_t *req)
 {
     if (s_token[0] == '\0') return false;
+    // "Authorization: Bearer <token>" header (the app uses this).
     char h[64];
-    if (httpd_req_get_hdr_value_str(req, "Authorization", h, sizeof(h)) != ESP_OK)
-        return false;
-    return strncmp(h, "Bearer ", 7) == 0 && strcmp(h + 7, s_token) == 0;
+    if (httpd_req_get_hdr_value_str(req, "Authorization", h, sizeof(h)) == ESP_OK
+        && strncmp(h, "Bearer ", 7) == 0 && strcmp(h + 7, s_token) == 0)
+        return true;
+    // ...or "?token=<token>" query param, so a plain browser URL works for testing.
+    char q[128], val[40];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK
+        && httpd_query_key_value(q, "token", val, sizeof(val)) == ESP_OK
+        && strcmp(val, s_token) == 0)
+        return true;
+    return false;
 }
 
 static esp_err_t deny(httpd_req_t *req)
@@ -122,13 +133,13 @@ static esp_err_t h_file(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such file");
         return ESP_FAIL;
     }
-    FILE *f = fopen(path, "rb");
-    if (!f) { httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "open"); return ESP_FAIL; }
-    fseek(f, 0, SEEK_END);
-    long total = ftell(f);
+    // POSIX open/read, NOT stdio fopen/fread: newlib's small default file buffer
+    // turns each read into a swarm of tiny SD transactions -> 6 KB/s vs 92 KB/s.
+    int ffd = open(path, O_RDONLY);
+    if (ffd < 0) { httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "open"); return ESP_FAIL; }
+    long total = (long)lseek(ffd, 0, SEEK_END);
 
-    // Disable Nagle on this socket: without it, small chunked writes deadlock with
-    // the peer's delayed ACKs -> ~single-digit KB/s. Biggest throughput win.
+    // Disable Nagle on this socket (harmless; helps some clients).
     int fd = httpd_req_to_sockfd(req), one = 1;
     if (fd >= 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
@@ -142,7 +153,7 @@ static esp_err_t h_file(httpd_req_t *req)
             start = s;
             if (e >= 0 && e < total) end = e;
             if (start < 0) start = 0;
-            if (start > end) { fclose(f); httpd_resp_set_status(req, "416 Range Not Satisfiable"); httpd_resp_sendstr(req, ""); return ESP_OK; }
+            if (start > end) { close(ffd); httpd_resp_set_status(req, "416 Range Not Satisfiable"); httpd_resp_sendstr(req, ""); return ESP_OK; }
         }
     }
 
@@ -160,25 +171,21 @@ static esp_err_t h_file(httpd_req_t *req)
         httpd_resp_set_hdr(req, "Content-Range", crange);
     }
 
-    fseek(f, start, SEEK_SET);
+    lseek(ffd, start, SEEK_SET);
     long remain = end - start + 1;
-    // 8 KB static buffer: sector-aligned SD reads + fewer sends (research sweet
-    // spot). Static (httpd serves one request at a time) so no heap cost — free
-    // heap can be ~20 KB in unprovisioned AP+BLE mode where a big malloc fails.
-    static uint8_t buf[8192];
     while (remain > 0) {
-        size_t want = remain < (long)sizeof(buf) ? (size_t)remain : sizeof(buf);
-        size_t r = fread(buf, 1, want, f);
-        if (r == 0) break;
-        if (httpd_resp_send_chunk(req, (const char *)buf, r) != ESP_OK) {
+        size_t want = remain < (long)sizeof(s_sendbuf) ? (size_t)remain : sizeof(s_sendbuf);
+        ssize_t r = read(ffd, s_sendbuf, want);
+        if (r <= 0) break;
+        if (httpd_resp_send_chunk(req, (const char *)s_sendbuf, r) != ESP_OK) {
             ESP_LOGW(TAG, "file %d: send failed at offset %ld/%ld",
                      id, total - remain, total);
-            fclose(f);
+            close(ffd);
             return ESP_FAIL;
         }
         remain -= r;
     }
-    fclose(f);
+    close(ffd);
     httpd_resp_send_chunk(req, NULL, 0);       // end of chunked response
     return ESP_OK;
 }
@@ -193,6 +200,54 @@ static esp_err_t h_delete(httpd_req_t *req)
         return ESP_FAIL;
     }
     httpd_resp_sendstr(req, "deleted");
+    return ESP_OK;
+}
+
+// GET /speedtest -- stream 4 MB of generated data (NO SD read, no auth). Isolates
+// pure Wi-Fi/TCP throughput from SD-read speed. curl http://192.168.4.1:8080/speedtest
+static esp_err_t h_speedtest(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req), one = 1;
+    if (fd >= 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    memset(s_sendbuf, 'A', sizeof(s_sendbuf));
+    httpd_resp_set_type(req, "application/octet-stream");
+    for (int i = 0; i < 512; i++)                      // 512 * 8 KB = 4 MB
+        if (httpd_resp_send_chunk(req, (const char *)s_sendbuf, sizeof(s_sendbuf)) != ESP_OK) break;
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+// GET /sdread -- read file id 0 fully from SD and DISCARD it (no Wi-Fi send, no
+// auth). Isolates pure SD read speed. curl http://192.168.4.1:8080/sdread
+static esp_err_t h_sdread(httpd_req_t *req)
+{
+    char path[160];
+    if (!manifest_path_for_id(0, path, sizeof(path))) {
+        httpd_resp_sendstr(req, "no file id 0\n"); return ESP_OK;
+    }
+    // POSIX read() (no stdio buffering) vs stdio fread() -- compare both.
+    int64_t t0 = esp_timer_get_time();
+    int fd = open(path, O_RDONLY);
+    long total = 0; ssize_t r;
+    if (fd >= 0) {
+        while ((r = read(fd, s_sendbuf, sizeof(s_sendbuf))) > 0) total += (long)r;
+        close(fd);
+    }
+    int64_t ms1 = (esp_timer_get_time() - t0) / 1000;
+
+    int64_t t1 = esp_timer_get_time();
+    FILE *f = fopen(path, "rb");
+    long total2 = 0; size_t r2;
+    if (f) { while ((r2 = fread(s_sendbuf, 1, sizeof(s_sendbuf), f)) > 0) total2 += (long)r2; fclose(f); }
+    int64_t ms2 = (esp_timer_get_time() - t1) / 1000;
+
+    char body[192];
+    snprintf(body, sizeof(body),
+             "POSIX read %ld B in %lld ms = %ld KB/s\nstdio fread %ld B in %lld ms = %ld KB/s\n",
+             total,  (long long)ms1, (long)(ms1 > 0 ? total  / ms1 : 0),
+             total2, (long long)ms2, (long)(ms2 > 0 ? total2 / ms2 : 0));
+    ESP_LOGI(TAG, "%s", body);
+    httpd_resp_sendstr(req, body);
     return ESP_OK;
 }
 
@@ -236,6 +291,8 @@ bool filesrv_start(void)
         { .uri = "/file/*",       .method = HTTP_GET,    .handler = h_file },
         { .uri = "/file/*",       .method = HTTP_DELETE, .handler = h_delete },
         { .uri = "/session/stop", .method = HTTP_POST,   .handler = h_stop },
+        { .uri = "/speedtest",    .method = HTTP_GET,    .handler = h_speedtest },
+        { .uri = "/sdread",       .method = HTTP_GET,    .handler = h_sdread },
     };
     for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); i++)
         httpd_register_uri_handler(s_srv, &routes[i]);

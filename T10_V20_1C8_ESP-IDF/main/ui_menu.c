@@ -577,25 +577,49 @@ static void vib_cb(lv_event_t *e)
 
 // --- File Sync (SoftAP direct transfer) -------------------------------------
 
-static lv_obj_t   *s_ap_label;
-static lv_timer_t *s_ap_timer;
-static char        s_ap_ssid[20], s_ap_pass[16];
+static lv_obj_t     *s_ap_label;
+static lv_timer_t   *s_ap_timer;
+static char          s_ap_ssid[20], s_ap_pass[16];
+static volatile bool s_ap_busy;
 
 static void ap_update(lv_timer_t *t)
 {
     (void)t;
     if (!s_ap_label) return;
+    if (!apmode_active() || s_ap_ssid[0] == '\0') {
+        lv_label_set_text(s_ap_label, "Starting SoftAP...\n(a few seconds)");
+        return;
+    }
     lv_label_set_text_fmt(s_ap_label,
         "Join WiFi:\n%s\npass: %s\n\nhttp://192.168.4.1:8080\n\nclients: %d",
         s_ap_ssid, s_ap_pass, apmode_clients());
+}
+
+// Bringing the AP up/down blocks (~1.5 s BLE-settle, Wi-Fi mode switch), so do it
+// off the LVGL task or the UI freezes.
+static void filesync_start_task(void *arg)
+{
+    (void)arg;
+    apmode_start(s_ap_ssid, sizeof(s_ap_ssid), s_ap_pass, sizeof(s_ap_pass));
+    filesrv_start();
+    s_ap_busy = false;
+    vTaskDelete(NULL);
+}
+
+static void filesync_stop_task(void *arg)
+{
+    (void)arg;
+    filesrv_stop();                      // stop HTTP server (SD stays mounted)
+    apmode_stop();                       // revert to home Wi-Fi
+    s_ap_busy = false;
+    vTaskDelete(NULL);
 }
 
 static void filesync_back_cb(lv_event_t *e)
 {
     if (s_ap_timer) { lv_timer_delete(s_ap_timer); s_ap_timer = NULL; }
     s_ap_label = NULL;
-    filesrv_stop();                      // stop HTTP server (SD stays mounted)
-    apmode_stop();                       // revert to home Wi-Fi
+    if (!s_ap_busy) { s_ap_busy = true; xTaskCreate(filesync_stop_task, "apstop", 4096, NULL, 5, NULL); }
     back_cb(e);
 }
 
@@ -605,14 +629,10 @@ static void filesync_cb(lv_event_t *e)
     lv_obj_t *page = page_shell("File Sync");
     lv_obj_set_scroll_dir(page, LV_DIR_VER);
 
-    if (apmode_start(s_ap_ssid, sizeof(s_ap_ssid), s_ap_pass, sizeof(s_ap_pass))) {
-        filesrv_start();                 // HTTP file server on the SoftAP (on demand)
-        s_ap_label = page_text(page, "...");
-        ap_update(NULL);
-        s_ap_timer = lv_timer_create(ap_update, 1000, NULL);
-    } else {
-        page_text(page, "SoftAP failed\nto start.");
-    }
+    s_ap_ssid[0] = s_ap_pass[0] = '\0';
+    s_ap_label = page_text(page, "Starting SoftAP...");
+    s_ap_timer = lv_timer_create(ap_update, 500, NULL);
+    if (!s_ap_busy) { s_ap_busy = true; xTaskCreate(filesync_start_task, "apstart", 4096, NULL, 5, NULL); }
 
     lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Stop & Back", filesync_back_cb);
     lv_screen_load(page);
