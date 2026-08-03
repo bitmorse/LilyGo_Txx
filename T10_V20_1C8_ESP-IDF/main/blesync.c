@@ -155,21 +155,29 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
 static void advertise(void)
 {
+    // The 128-bit service UUID (18 B) + name (14 B) + flags (3 B) overflows the
+    // 31-byte adv packet -> put the name in the adv, the UUID in the scan response.
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = (uint8_t *)s_name;
     fields.name_len = strlen(s_name);
     fields.name_is_complete = 1;
-    fields.uuids128 = (ble_uuid128_t *)&s_svc_uuid;
-    fields.num_uuids128 = 1;
-    fields.uuids128_is_complete = 1;
-    ble_gap_adv_set_fields(&fields);
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc) { ESP_LOGE(TAG, "adv_set_fields rc=%d", rc); return; }
+
+    struct ble_hs_adv_fields rsp = {0};
+    rsp.uuids128 = (ble_uuid128_t *)&s_svc_uuid;
+    rsp.num_uuids128 = 1;
+    rsp.uuids128_is_complete = 1;
+    rc = ble_gap_adv_rsp_set_fields(&rsp);
+    if (rc) ESP_LOGW(TAG, "adv_rsp_set_fields rc=%d", rc);
 
     struct ble_gap_adv_params adv = {0};
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
-    ESP_LOGI(TAG, "advertising as %s", s_name);
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
+    if (rc) { ESP_LOGE(TAG, "adv_start rc=%d", rc); return; }
+    ESP_LOGI(TAG, "advertising as %s (rc=0)", s_name);
 }
 
 static void on_sync(void)
