@@ -2,12 +2,14 @@
 #include "manifest.h"
 #include "sdcard.h"
 #include "provisioning.h"
+#include "blesync.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include "esp_http_server.h"
 #include "esp_random.h"
 #include "esp_mac.h"
@@ -85,6 +87,22 @@ static esp_err_t deny(httpd_req_t *req)
     return ESP_OK;
 }
 
+// One request per TCP connection: don't offer HTTP keep-alive. esp_http_server is
+// persistent by default, but this single-worker server on a low-RAM ESP32 stalls
+// the body of a *second* request served on a reused socket (curl reproduces it:
+// /manifest then /file on one connection hangs after the file's headers; each on a
+// fresh socket streams fine). iOS URLSession pools requests onto one socket and
+// hits exactly that, so downloads time out. Fix server-side (a client Connection:
+// close can't be trusted -- URLSession ignores its own): tell the client we'll
+// close, and queue the socket close. trigger_close is async via the control socket,
+// so it fires only after THIS response is fully flushed -- never truncates it, and
+// covers every return path from one call at the top of the handler.
+static void close_conn(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Connection", "close");   // literals: stored by pointer
+    httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+}
+
 static int id_from_uri(const char *uri)   // ".../file/7" -> 7
 {
     const char *slash = strrchr(uri, '/');
@@ -96,6 +114,7 @@ static int id_from_uri(const char *uri)   // ".../file/7" -> 7
 // GET /info -- UNAUTHENTICATED reachability + capability probe (no file contents).
 static esp_err_t h_info(httpd_req_t *req)
 {
+    close_conn(req);
     touch();
     char ssid[20];
     softap_ssid(ssid, sizeof(ssid));
@@ -124,10 +143,13 @@ static esp_err_t h_info(httpd_req_t *req)
 // GET /manifest -- token-protected file list.
 static esp_err_t h_manifest(httpd_req_t *req)
 {
+    close_conn(req);
     if (!auth_ok(req)) return deny(req);
-    static char json[12288];
+    static char json[10240];                   // sized to hold all MAX_FILES entries
     int64_t t0 = esp_timer_get_time();
+    manifest_precache_hold(true);              // full SD bus for the scan
     int n = manifest_build_json(json, sizeof(json));
+    manifest_precache_hold(false);
     ESP_LOGI(TAG, "manifest: %d bytes in %lld ms", n, (esp_timer_get_time() - t0) / 1000);
     if (n < 0) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "manifest"); return ESP_FAIL; }
     httpd_resp_set_type(req, "application/json");
@@ -138,6 +160,7 @@ static esp_err_t h_manifest(httpd_req_t *req)
 // GET /file/<id> -- token-protected, Range-resumable, ETag = sha256.
 static esp_err_t h_file(httpd_req_t *req)
 {
+    close_conn(req);
     if (!auth_ok(req)) return deny(req);
     int id = id_from_uri(req->uri);
     char path[160];
@@ -169,10 +192,14 @@ static esp_err_t h_file(httpd_req_t *req)
         }
     }
 
+    // Pause the background sha256 precache for the whole transfer so this download
+    // owns the SD bus (else the two contend and the client times out mid-body).
+    manifest_precache_hold(true);
+
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
     char etag[70], hex[65];
-    if (manifest_sha256_for_id(id, hex, sizeof(hex))) {
+    if (manifest_sha256_for_id(id, hex, sizeof(hex))) {   // sidecar-only, never computes
         snprintf(etag, sizeof(etag), "\"%s\"", hex);
         httpd_resp_set_hdr(req, "ETag", etag);
     }
@@ -183,28 +210,45 @@ static esp_err_t h_file(httpd_req_t *req)
         httpd_resp_set_hdr(req, "Content-Range", crange);
     }
 
+    ESP_LOGI(TAG, "file %d: serving bytes %ld-%ld/%ld (%s)",
+             id, start, end, total, partial ? "206" : "200");
     lseek(ffd, start, SEEK_SET);
-    long remain = end - start + 1;
+    long remain = end - start + 1, sent = 0;
+    int64_t t0 = esp_timer_get_time();
+    bool first = true;
     while (remain > 0) {
         size_t want = remain < (long)sizeof(s_sendbuf) ? (size_t)remain : sizeof(s_sendbuf);
+        int64_t tr = esp_timer_get_time();
         ssize_t r = read(ffd, s_sendbuf, want);
-        if (r <= 0) break;
+        if (r <= 0) {
+            ESP_LOGW(TAG, "file %d: read()=%d at offset %ld (%lld ms) errno=%d",
+                     id, (int)r, start + sent, (esp_timer_get_time() - tr) / 1000, errno);
+            break;
+        }
         if (httpd_resp_send_chunk(req, (const char *)s_sendbuf, r) != ESP_OK) {
-            ESP_LOGW(TAG, "file %d: send failed at offset %ld/%ld",
-                     id, total - remain, total);
+            ESP_LOGW(TAG, "file %d: send failed at offset %ld/%ld", id, start + sent, total);
             close(ffd);
+            manifest_precache_hold(false);
             return ESP_FAIL;
         }
+        if (first) { ESP_LOGI(TAG, "file %d: first %d B out in %lld ms",
+                              id, (int)r, (esp_timer_get_time() - t0) / 1000); first = false; }
+        sent   += r;
         remain -= r;
     }
     close(ffd);
+    manifest_precache_hold(false);
     httpd_resp_send_chunk(req, NULL, 0);       // end of chunked response
+    int64_t ms = (esp_timer_get_time() - t0) / 1000;
+    ESP_LOGI(TAG, "file %d: sent %ld B in %lld ms (%ld KB/s)",
+             id, sent, ms, (long)(ms > 0 ? sent / ms : 0));
     return ESP_OK;
 }
 
 // DELETE /file/<id> -- token-protected.
 static esp_err_t h_delete(httpd_req_t *req)
 {
+    close_conn(req);
     if (!auth_ok(req)) return deny(req);
     int id = id_from_uri(req->uri);
     if (id < 0 || !manifest_delete_id(id)) {
@@ -219,6 +263,7 @@ static esp_err_t h_delete(httpd_req_t *req)
 // pure Wi-Fi/TCP throughput from SD-read speed. curl http://192.168.4.1:8080/speedtest
 static esp_err_t h_speedtest(httpd_req_t *req)
 {
+    close_conn(req);
     int fd = httpd_req_to_sockfd(req), one = 1;
     if (fd >= 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     memset(s_sendbuf, 'A', sizeof(s_sendbuf));
@@ -233,6 +278,7 @@ static esp_err_t h_speedtest(httpd_req_t *req)
 // auth). Isolates pure SD read speed. curl http://192.168.4.1:8080/sdread
 static esp_err_t h_sdread(httpd_req_t *req)
 {
+    close_conn(req);
     char path[160];
     if (!manifest_path_for_id(0, path, sizeof(path))) {
         httpd_resp_sendstr(req, "no file id 0\n"); return ESP_OK;
@@ -266,10 +312,12 @@ static esp_err_t h_sdread(httpd_req_t *req)
 // POST /session/stop -- invalidate the token; SoftAP teardown wired in later.
 static esp_err_t h_stop(httpd_req_t *req)
 {
+    close_conn(req);
     if (!auth_ok(req)) return deny(req);
     ESP_LOGI(TAG, "session stop requested");
     s_token[0] = '\0';                          // invalidate
     httpd_resp_sendstr(req, "stopping");
+    blesync_teardown_wifi();                    // stop SoftAP+server, restart BLE (own task)
     return ESP_OK;
 }
 
@@ -284,7 +332,10 @@ static void precache_task(void *arg)
 
 bool filesrv_start(void)
 {
-    if (s_srv) return true;
+    new_token();                               // always (re)issue a valid token,
+    touch();                                   // even if the server is already up
+    if (s_srv) return true;                     // (e.g. a re-triggered START_SOFTAP)
+    manifest_init();                            // create the scan lock (single-threaded here)
     if (!sd_mount()) { ESP_LOGE(TAG, "no SD card"); return false; }
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
@@ -309,9 +360,6 @@ bool filesrv_start(void)
     for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); i++)
         httpd_register_uri_handler(s_srv, &routes[i]);
 
-    new_token();
-    touch();                                   // reset the idle clock at start
-
     // A sleeping STA drops inbound unicast (the server becomes unreachable while
     // mDNS multicast still works). Keep the radio awake while serving files.
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -324,7 +372,7 @@ bool filesrv_start(void)
 
     // Precompute sha256 sidecars in the background so the manifest never blocks
     // on hashing (reading multi-MB files off the SPI SD is slow).
-    xTaskCreate(precache_task, "sha_cache", 6144, NULL, 3, NULL);
+    xTaskCreate(precache_task, "sha_cache", 8192, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "file server on :%d  (token=%s)  http://t10.local:%d/info",
              PORT, s_token, PORT);

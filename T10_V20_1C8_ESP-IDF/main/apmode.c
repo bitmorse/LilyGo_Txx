@@ -60,8 +60,11 @@ static void make_pass(char *out, int cap)
 
 bool apmode_start(char *ssid, int ssid_cap, char *pass, int pass_cap)
 {
-    make_ssid(ssid, ssid_cap);
+    make_ssid(ssid, ssid_cap);                 // deterministic; safe to recompute
     make_pass(pass, pass_cap);
+    if (s_active) return true;                  // already up -- don't re-blip the AP
+                                                // (a re-triggered START_SOFTAP would
+                                                // otherwise drop the client mid-download)
 
     // SoftAP + active BLE advertising is unstable on the classic ESP32 (the BLE
     // events interrupt the Wi-Fi transfer -> mid-stream drops). Stop provisioning

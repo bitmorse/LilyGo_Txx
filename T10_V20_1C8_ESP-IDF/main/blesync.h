@@ -12,7 +12,16 @@
 #include <stdbool.h>
 
 // Init NimBLE + the sync GATT service and start advertising as "Octanis-XXXX".
-// Returns false if BLE could not start. Safe to call once.
+// Returns false if BLE could not start. Re-callable after blesync_stop().
 bool blesync_start(void);
+
+// Tear the BLE stack fully down (host + controller), returning its RAM to the heap.
+// Done automatically once the Wi-Fi handoff is delivered, because BLE + SoftAP +
+// LWIP together exhaust the heap on this no-PSRAM ESP32.
+void blesync_stop(void);
+
+// Stop the Wi-Fi session (SoftAP + file server) and return to BLE-advertising idle.
+// Safe to call from an HTTP handler or the app_main loop (runs on its own task).
+void blesync_teardown_wifi(void);
 
 bool blesync_active(void);

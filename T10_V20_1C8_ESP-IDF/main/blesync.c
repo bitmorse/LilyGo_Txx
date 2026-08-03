@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_mac.h"
+#include "esp_system.h"
 #include "esp_log.h"
 
 #include "nimble/nimble_port.h"
@@ -78,6 +79,14 @@ static void softap_task(void *arg)
     if (apmode_start(s_ap_ssid, sizeof(s_ap_ssid), s_ap_pass, sizeof(s_ap_pass)))
         filesrv_start();
     notify_handoff();
+    // CRITICAL (no-PSRAM ESP32): BLE + SoftAP + LWIP together starve the heap to
+    // ~2 KB, so LWIP can't allocate TX buffers and the file body stalls after the
+    // headers. Once the handoff notification has reached the phone, tear the whole
+    // BLE stack down -- nimble_port_deinit() disables + deinits the controller and
+    // returns ~tens of KB to the heap for the Wi-Fi transfer. BLE is restarted on
+    // session teardown (stop_task) for the next sync. Give the notify ~1 s to flush.
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    blesync_stop();
     vTaskDelete(NULL);
 }
 
@@ -86,7 +95,16 @@ static void stop_task(void *arg)
     (void)arg;
     filesrv_stop();
     apmode_stop();
+    blesync_start();                           // BLE back up for the next session
     vTaskDelete(NULL);
+}
+
+// Public: tear down the Wi-Fi session and return to BLE-advertising idle. Called
+// from the HTTP /session/stop handler and the app_main watchdog. Runs the teardown
+// on its own task (filesrv_stop() must not run on the httpd task).
+void blesync_teardown_wifi(void)
+{
+    xTaskCreate(stop_task, "ap_stop", 4096, NULL, 5, NULL);
 }
 
 static int ctrl_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -135,17 +153,16 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "connected");
-        } else {
+        } else if (s_active) {
             advertise();
         }
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        ESP_LOGI(TAG, "disconnected, re-advertising");
-        advertise();
+        if (s_active) { ESP_LOGI(TAG, "disconnected, re-advertising"); advertise(); }
         break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        advertise();
+        if (s_active) advertise();
         break;
     default:
         break;
@@ -220,4 +237,26 @@ bool blesync_start(void)
     s_active = true;
     ESP_LOGI(TAG, "BLE sync service started");
     return true;
+}
+
+// Tear the BLE stack all the way down (host + controller), returning its RAM to the
+// heap. Symmetric with blesync_start(), so BLE can be brought back for a later sync.
+void blesync_stop(void)
+{
+    if (!s_active) return;
+    s_active = false;                          // stop gap_event from re-advertising
+
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    }
+    ble_gap_adv_stop();                        // best-effort; ignore rc if not adv
+
+    int rc = nimble_port_stop();               // unblocks host_task's nimble_port_run()
+    if (rc == 0) {
+        nimble_port_deinit();                  // disable+deinit controller -> heap freed
+    } else {
+        ESP_LOGE(TAG, "nimble_port_stop rc=%d (BLE not fully freed)", rc);
+    }
+    ESP_LOGI(TAG, "BLE stopped; heap now %u", (unsigned)esp_get_free_heap_size());
 }

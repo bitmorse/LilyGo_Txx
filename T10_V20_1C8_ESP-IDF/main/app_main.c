@@ -80,6 +80,7 @@ void app_main(void)
             ESP_LOGW(TAG, "SoftAP unused -> teardown to sync-idle");
             filesrv_stop();
             apmode_stop();
+            blesync_start();               // BLE was freed for the transfer; bring it back
         }
 
         if (now - last_beat > 5 * 1000 * 1000) {   // every 5 s

@@ -8,16 +8,21 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <assert.h>
 #include "esp_vfs_fat.h"
 #include "mbedtls/sha256.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "manifest";
 
 #define MOUNT     "/sdcard"
-#define MAX_FILES 48      // list buffer is MAX_FILES*sizeof(entry_t); keep the
-                          // malloc small so it succeeds in low-heap AP+BLE mode
+#define MAX_FILES 40      // bounds the static scan buffer (DRAM is tight: no PSRAM,
+                          // and WiFi+BLE+LVGL already claim most of it). The manifest
+                          // JSON buffer in filesrv.c is sized to hold all MAX_FILES.
 #define NAME_MAX_ 64
 
 typedef struct {
@@ -25,6 +30,30 @@ typedef struct {
     long   size;
     time_t mtime;
 } entry_t;
+
+// A single, mutex-guarded scan buffer shared by every entry point. NO heap in the
+// manifest path (a malloc here failed in low-heap AP+BLE mode -> /manifest 500).
+// Every public function locks, scans into s_files, does its FAST work (never a full
+// file read), and unlocks -- so the lock is held only for quick directory scans,
+// never during hashing or streaming. Created once in manifest_init() before any
+// task can call in (single-threaded at that point).
+static entry_t          s_files[MAX_FILES];
+static SemaphoreHandle_t s_lock;
+
+// Set true by the HTTP file handler while a transfer is in progress. The background
+// precache polls it and yields the SD bus, so a client download runs at full speed
+// instead of contending with sha256 hashing.
+static volatile bool s_precache_hold;
+
+void manifest_init(void)
+{
+    if (!s_lock) s_lock = xSemaphoreCreateMutex();   // idempotent
+}
+
+void manifest_precache_hold(bool hold) { s_precache_hold = hold; }
+
+static void lock(void)   { assert(s_lock); xSemaphoreTake(s_lock, portMAX_DELAY); }
+static void unlock(void) { xSemaphoreGive(s_lock); }
 
 // --- helpers ----------------------------------------------------------------
 
@@ -81,17 +110,6 @@ static int scan(entry_t *list, int max)
     return n;
 }
 
-// Heap-allocate the list (it is ~10 KB — too big for the HTTP task's stack) and
-// scan into it. Caller frees *out. Returns the file count (0 and *out=NULL on OOM).
-static int scan_alloc(entry_t **out)
-{
-    entry_t *l = malloc(sizeof(entry_t) * MAX_FILES);
-    if (!l) { *out = NULL; return 0; }
-    int n = scan(l, MAX_FILES);
-    *out = l;
-    return n;
-}
-
 // Compute sha256 of a file, streaming from SD. Writes 64 hex chars + NUL.
 static bool compute_sha256(const char *path, char *hex)
 {
@@ -109,9 +127,12 @@ static bool compute_sha256(const char *path, char *hex)
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);                     // 0 = SHA-256 (HW accel)
 
-    uint8_t buf[2048];                                  // stack (compute can run on 2 tasks)
+    uint8_t buf[2048];                                  // stack (precache task only)
     ssize_t r;
     while (remaining > 0 && (r = read(fd, buf, sizeof(buf))) > 0) {
+        // Yield the SD bus to an active client download: this only runs on the
+        // background precache task, so pausing here costs nothing the user sees.
+        while (s_precache_hold) vTaskDelay(pdMS_TO_TICKS(100));
         mbedtls_sha256_update(&ctx, buf, r);
         remaining -= (long)r;
     }
@@ -164,91 +185,110 @@ static bool sha256_cached(const char *name, char *hex)
 
 int manifest_build_json(char *out, int cap)
 {
-    entry_t *list;
-    int n = scan_alloc(&list);
-    if (!list) return -1;
-
+    assert(out && cap > 64);
     unsigned long long freeb = 0;
     uint64_t total = 0, avail = 0;
     if (esp_vfs_fat_info(MOUNT, &total, &avail) == ESP_OK)
         freeb = avail;
 
+    lock();
+    int n = scan(s_files, MAX_FILES);
     int off = snprintf(out, cap, "{\"v\":1,\"free_bytes\":%llu,\"files\":[", freeb);
-    for (int i = 0; i < n && off < cap - 256; i++) {
+    if (off < 0 || off >= cap) { unlock(); return -1; }         // header didn't fit
+
+    for (int i = 0; i < n; i++) {
         char hex[65] = {0};
-        bool have_hash = sha256_read_sidecar(list[i].name, hex);   // fast; no compute
+        bool have_hash = sha256_read_sidecar(s_files[i].name, hex);  // fast; no compute
 
         char iso[24];
         struct tm tmv;
-        gmtime_r(&list[i].mtime, &tmv);
+        gmtime_r(&s_files[i].mtime, &tmv);
         strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tmv);
 
-        off += snprintf(out + off, cap - off,
+        // One entry needs at most ~200 bytes; stop cleanly (valid JSON) rather than
+        // overflow. A truncated manifest beats a 500 -- the client still syncs what
+        // it sees and re-lists later.
+        char ent[288];
+        int m = snprintf(ent, sizeof(ent),
             "%s{\"id\":%d,\"name\":\"%s\",\"mime\":\"%s\",\"bytes\":%ld,"
             "\"created_at\":\"%s\"%s%s%s}",
-            i ? "," : "", i, list[i].name, mime_for(list[i].name),
-            list[i].size, iso,
+            i ? "," : "", i, s_files[i].name, mime_for(s_files[i].name),
+            s_files[i].size, iso,
             have_hash ? ",\"sha256\":\"" : "", have_hash ? hex : "",
             have_hash ? "\"" : "");
+        if (m < 0 || off + m >= cap - 2) break;                // leave room for "]}"
+        memcpy(out + off, ent, m);
+        off += m;
     }
-    off += snprintf(out + off, cap - off, "]}");
-    free(list);
-    return (off < cap) ? off : -1;
+    unlock();
+
+    out[off++] = ']';
+    out[off++] = '}';
+    out[off]   = '\0';
+    return off;
 }
 
 bool manifest_path_for_id(int id, char *path, int cap)
 {
-    entry_t *list;
-    int n = scan_alloc(&list);
-    if (!list) return false;
+    lock();
+    int n = scan(s_files, MAX_FILES);
     bool ok = (id >= 0 && id < n);
-    if (ok) snprintf(path, cap, "%s/%s", MOUNT, list[id].name);
-    free(list);
+    if (ok) snprintf(path, cap, "%s/%s", MOUNT, s_files[id].name);
+    unlock();
     return ok;
 }
 
+// ETag lookup for /file: sidecar-only, NEVER computes (a full-file read here would
+// stall the body before a single byte streams -> client timeout). Returns false if
+// the sha256 hasn't been cached by the background precache yet -> ETag is omitted.
 bool manifest_sha256_for_id(int id, char *hex64, int cap)
 {
-    entry_t *list;
-    int n = scan_alloc(&list);
-    if (!list) return false;
-    bool ok = (id >= 0 && id < n && cap >= 65);
-    if (ok) ok = sha256_cached(list[id].name, hex64);
-    free(list);
-    return ok;
+    if (cap < 65) return false;
+    char name[NAME_MAX_];
+    lock();
+    int n = scan(s_files, MAX_FILES);
+    bool ok = (id >= 0 && id < n);
+    if (ok) memcpy(name, s_files[id].name, NAME_MAX_);
+    unlock();
+    return ok && sha256_read_sidecar(name, hex64);
 }
 
 void manifest_precache(void)
 {
-    entry_t *list;
-    int n = scan_alloc(&list);
-    if (!list) return;
+    // Snapshot the names under the lock, then hash OUTSIDE it (hashing is slow and
+    // must not hold the scan lock, nor block a client download -- see the hold flag).
+    // On the precache task's own stack (bumped to 8 KB), not BSS -- DRAM is scarce.
+    char names[MAX_FILES][NAME_MAX_];          // MAX_FILES*NAME_MAX_ = 2560 B on stack
+    lock();
+    int n = scan(s_files, MAX_FILES);
+    for (int i = 0; i < n; i++) memcpy(names[i], s_files[i].name, NAME_MAX_);
+    unlock();
+
     char hex[65];
     for (int i = 0; i < n; i++) {
-        if (sha256_read_sidecar(list[i].name, hex)) continue;   // already cached
+        while (s_precache_hold) vTaskDelay(pdMS_TO_TICKS(200));  // yield to a transfer
+        if (sha256_read_sidecar(names[i], hex)) continue;       // already cached
         int64_t t0 = esp_timer_get_time();
-        if (sha256_cached(list[i].name, hex))                   // computes + caches
-            ESP_LOGI(TAG, "sha256 %s in %lld ms", list[i].name,
+        if (sha256_cached(names[i], hex))                       // computes + caches
+            ESP_LOGI(TAG, "sha256 %s in %lld ms", names[i],
                      (esp_timer_get_time() - t0) / 1000);
     }
-    free(list);
     ESP_LOGI(TAG, "precache done (%d files)", n);
 }
 
 bool manifest_delete_id(int id)
 {
-    entry_t *list;
-    int n = scan_alloc(&list);
-    if (!list) return false;
+    char path[300];
+    lock();
+    int n = scan(s_files, MAX_FILES);
     bool ok = (id >= 0 && id < n);
     if (ok) {
-        char path[160];
-        snprintf(path, sizeof(path), "%s/%s", MOUNT, list[id].name);
+        snprintf(path, sizeof(path), "%s/%s", MOUNT, s_files[id].name);
         remove(path);
-        snprintf(path, sizeof(path), "%s/%s.s256", MOUNT, list[id].name);
+        snprintf(path, sizeof(path), "%s/%s.s256", MOUNT, s_files[id].name);
         remove(path);                                    // best-effort sidecar
-        ESP_LOGI(TAG, "deleted id %d (%s)", id, list[id].name);
+        ESP_LOGI(TAG, "deleted id %d (%s)", id, s_files[id].name);
     }
-    free(list);
+    unlock();
     return ok;
 }

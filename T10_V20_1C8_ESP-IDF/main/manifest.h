@@ -5,16 +5,25 @@
 
 #include <stdbool.h>
 
+// Create the internal scan lock. Call once, single-threaded, before the HTTP
+// handlers or the precache task can call any other function here.
+void manifest_init(void);
+
+// Pause/resume the background sha256 precache. The HTTP file handler holds this
+// during a transfer so a client download gets the full SD bus (no hashing races).
+void manifest_precache_hold(bool hold);
+
 // Build the manifest JSON into `out` (capacity `cap`). Returns the length written,
-// or -1 on error. Lazily computes and caches a sha256 sidecar (<name>.s256) per
-// file, so repeat calls are cheap.
+// or -1 only if `out` is too small for even the header. sha256 fields come from
+// cached sidecars (never computed here); a file not yet hashed omits its sha256.
+// Overflow is handled gracefully: the file list is truncated to valid JSON.
 int manifest_build_json(char *out, int cap);
 
 // Map a manifest id (stable within a directory scan) to its /sdcard path.
 bool manifest_path_for_id(int id, char *path, int cap);
 
-// 64-char lowercase-hex sha256 for a file id (from the cached sidecar). Returns
-// false if the id is unknown.
+// 64-char lowercase-hex sha256 for a file id (from the cached sidecar only, never
+// computed). Returns false if the id is unknown or not yet hashed by the precache.
 bool manifest_sha256_for_id(int id, char *hex64, int cap);
 
 // Delete a file (and its sha256 sidecar) by id. Returns false if not found.
