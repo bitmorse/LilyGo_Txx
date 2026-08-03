@@ -1,5 +1,4 @@
 #include "apmode.h"
-#include "provisioning.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -22,11 +21,14 @@ static esp_netif_t   *s_ap_netif;
 static volatile bool  s_active;
 static volatile int   s_clients;
 static volatile int64_t s_last_client_ms;      // last time a client was present
+static char           s_ssid[20], s_pass[16];  // current session creds
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
 bool apmode_active(void)  { return s_active; }
 int  apmode_clients(void) { return s_clients; }
+const char *apmode_ssid(void) { return s_ssid; }
+const char *apmode_pass(void) { return s_pass; }
 
 // Milliseconds with zero clients connected (0 while a client is present). Used by
 // the sync-session watchdog to tear the AP down if nobody uses it.
@@ -58,21 +60,18 @@ static void make_pass(char *out, int cap)
     snprintf(out, cap, "octanis123");
 }
 
-bool apmode_start(char *ssid, int ssid_cap, char *pass, int pass_cap)
+bool apmode_start_session(void)
 {
-    make_ssid(ssid, ssid_cap);                 // deterministic; safe to recompute
-    make_pass(pass, pass_cap);
+    make_ssid(s_ssid, sizeof(s_ssid));         // deterministic; safe to recompute
+    make_pass(s_pass, sizeof(s_pass));
     if (s_active) return true;                  // already up -- don't re-blip the AP
-                                                // (a re-triggered START_SOFTAP would
+                                                // (a re-triggered START would
                                                 // otherwise drop the client mid-download)
 
-    // SoftAP + active BLE advertising is unstable on the classic ESP32 (the BLE
-    // events interrupt the Wi-Fi transfer -> mid-stream drops). Stop provisioning
-    // BLE before bringing the AP up. The manager stop is ASYNC and its teardown
-    // flips Wi-Fi back to STA + releases BT ~1 s later, which would clobber our AP
-    // if we set AP mode first -- so wait it out here (this runs off the UI task).
-    provisioning_stop_ble();
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    // NOTE: BLE must already be stopped by netmgr before this in the sync case --
+    // SoftAP + active BLE starve the heap. netmgr sequences that; apmode just owns
+    // the AP netif + Wi-Fi mode.
+    char *ssid = s_ssid, *pass = s_pass;
 
     if (s_ap_netif == NULL) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
@@ -109,8 +108,9 @@ void apmode_stop(void)
     if (!s_active) return;
     s_active = false;
     s_clients = 0;
-    // Back to STA and rejoin the provisioned home network.
+    s_ssid[0] = s_pass[0] = '\0';
+    // Switch the radio back to STA mode but do NOT connect -- netmgr decides whether
+    // to rejoin home WiFi (STA base) or sit in sync-idle with BLE (sync base).
     esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_connect();
-    ESP_LOGI(TAG, "SoftAP down, reconnecting to home Wi-Fi");
+    ESP_LOGI(TAG, "SoftAP down (radio -> STA idle)");
 }

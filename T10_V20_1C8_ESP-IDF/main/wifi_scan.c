@@ -7,7 +7,7 @@
 
 static const char *TAG = "wifi";
 
-// WiFi is initialised and started by provisioning_init(); we only scan here.
+// WiFi is initialised and started by provisioning_hw_init(); we only scan here.
 int wifi_scan_run(ap_info_t *out, int max)
 {
     wifi_scan_config_t sc = { .show_hidden = true };

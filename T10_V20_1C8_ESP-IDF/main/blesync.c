@@ -1,6 +1,7 @@
 #include "blesync.h"
 #include "apmode.h"
 #include "filesrv.h"
+#include "netmgr.h"                // netmgr_request_softap()/stop
 #include "provisioning.h"          // provisioning_is_connected()
 
 #include <string.h>
@@ -40,7 +41,6 @@ static uint8_t  s_own_addr_type;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_val_handle;
 static char     s_name[20];               // "Octanis-XXXX", also the SoftAP SSID
-static char     s_ap_ssid[20], s_ap_pass[16];
 
 bool blesync_active(void) { return s_active; }
 
@@ -58,55 +58,24 @@ static int info_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *
     return os_mbuf_append(ctxt->om, json, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
-// Notify the phone with the Wi-Fi handoff (SoftAP creds + server token).
-static void notify_handoff(void)
+// Notify the phone with the Wi-Fi handoff (SoftAP creds + server token). Public:
+// netmgr calls this once the AP + file server are up and the phone is still on the
+// BLE link, just before it tears BLE down for the transfer.
+void blesync_notify_handoff(void)
 {
     if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
     char json[192];
     int n = snprintf(json, sizeof(json),
         "{\"mode\":\"softap\",\"ssid\":\"%s\",\"pass\":\"%s\","
         "\"ip\":\"192.168.4.1\",\"port\":8080,\"token\":\"%s\"}",
-        s_ap_ssid, s_ap_pass, filesrv_token());
+        apmode_ssid(), apmode_pass(), filesrv_token());
     struct os_mbuf *om = ble_hs_mbuf_from_flat(json, n);
     if (om) ble_gatts_notify_custom(s_conn_handle, s_status_val_handle, om);
     ESP_LOGI(TAG, "handoff sent: %s", json);
 }
 
-// Bringing the AP up blocks (~1.5 s) -- do it off the NimBLE host task.
-static void softap_task(void *arg)
-{
-    (void)arg;
-    if (apmode_start(s_ap_ssid, sizeof(s_ap_ssid), s_ap_pass, sizeof(s_ap_pass)))
-        filesrv_start();
-    notify_handoff();
-    // CRITICAL (no-PSRAM ESP32): BLE + SoftAP + LWIP together starve the heap to
-    // ~2 KB, so LWIP can't allocate TX buffers and the file body stalls after the
-    // headers. Once the handoff notification has reached the phone, tear the whole
-    // BLE stack down -- nimble_port_deinit() disables + deinits the controller and
-    // returns ~tens of KB to the heap for the Wi-Fi transfer. BLE is restarted on
-    // session teardown (stop_task) for the next sync. Give the notify ~1 s to flush.
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    blesync_stop();
-    vTaskDelete(NULL);
-}
-
-static void stop_task(void *arg)
-{
-    (void)arg;
-    filesrv_stop();
-    apmode_stop();
-    blesync_start();                           // BLE back up for the next session
-    vTaskDelete(NULL);
-}
-
-// Public: tear down the Wi-Fi session and return to BLE-advertising idle. Called
-// from the HTTP /session/stop handler and the app_main watchdog. Runs the teardown
-// on its own task (filesrv_stop() must not run on the httpd task).
-void blesync_teardown_wifi(void)
-{
-    xTaskCreate(stop_task, "ap_stop", 4096, NULL, 5, NULL);
-}
-
+// The control characteristic just forwards intent to netmgr, which owns the WiFi
+// mode and BLE lifecycle (bring SoftAP up, hand off, free BLE / restore).
 static int ctrl_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)ch; (void)attr; (void)arg;
@@ -115,8 +84,8 @@ static int ctrl_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *
     if (len >= 1) os_mbuf_copydata(ctxt->om, 0, 1, &op);
     ESP_LOGI(TAG, "control opcode 0x%02X", op);
     switch (op) {
-    case OP_START_SOFTAP: xTaskCreate(softap_task, "ap_start", 4096, NULL, 5, NULL); break;
-    case OP_STOP_WIFI:    xTaskCreate(stop_task,   "ap_stop",  4096, NULL, 5, NULL); break;
+    case OP_START_SOFTAP: netmgr_request_softap(); break;
+    case OP_STOP_WIFI:    netmgr_request_stop_softap(); break;
     default: break;
     }
     return 0;

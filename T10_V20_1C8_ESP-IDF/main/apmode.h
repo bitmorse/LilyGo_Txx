@@ -11,12 +11,17 @@
 
 #include <stdbool.h>
 
-// Enter SoftAP mode (leaves home Wi-Fi/STA). Fills ssid + a fresh passphrase.
-// Returns false on error. Idempotent while active.
-bool apmode_start(char *ssid, int ssid_cap, char *pass, int pass_cap);
+// Enter SoftAP mode (leaves STA). SSID + passphrase are computed internally and
+// exposed via apmode_ssid()/apmode_pass(). Returns false on error. Idempotent
+// while active. Driven by netmgr, which owns the WiFi mode and BLE lifecycle.
+bool apmode_start_session(void);
 
-// Leave SoftAP mode and reconnect to the provisioned home Wi-Fi (STA).
+// Tear the SoftAP down and switch back to STA mode. Does NOT reconnect -- netmgr
+// decides whether to rejoin home WiFi or stay in sync-idle.
 void apmode_stop(void);
+
+const char *apmode_ssid(void);  // current SoftAP SSID  ("" if not active)
+const char *apmode_pass(void);  // current SoftAP passphrase ("" if not active)
 
 bool apmode_active(void);
 int  apmode_clients(void);      // number of stations currently associated

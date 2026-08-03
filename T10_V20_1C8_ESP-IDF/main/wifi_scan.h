@@ -9,5 +9,5 @@ typedef struct {
 } ap_info_t;
 
 // Run a blocking scan. Fills up to `max` entries in `out`, returns the count.
-// WiFi must already be started (provisioning_init() does that).
+// WiFi must already be started (provisioning_hw_init() does that).
 int wifi_scan_run(ap_info_t *out, int max);

@@ -3,6 +3,7 @@
 #include "wifi_scan.h"
 #include "imu.h"
 #include "provisioning.h"
+#include "netmgr.h"
 #include "airport.h"
 #include "audio.h"
 #include "radio.h"
@@ -268,17 +269,26 @@ static void board_info_cb(lv_event_t *e)
 static void repair_cb(lv_event_t *e)
 {
     (void)e;
-    provisioning_reset_and_restart();   // erases creds + reboots into pairing
+    netmgr_request_forget_wifi();        // erase creds + reboot into sync mode
+}
+
+// Kick off BLE WiFi provisioning. The manager reboots into a dedicated
+// provisioning mode (single-owner NimBLE), so show the QR the "ESP BLE
+// Provisioning" app scans, then the reboot happens.
+static void wifi_setup_start_cb(lv_event_t *e)
+{
+    (void)e;
+    netmgr_request_provisioning();       // sets flag + reboots into provisioning
 }
 
 static void wifi_setup_cb(lv_event_t *e)
 {
     (void)e;
-    prov_state_t st = provisioning_state();
+    net_state_t st = netmgr_state();
     lv_obj_t *page = page_shell("WiFi Setup");
 
-    if (st == PROV_PAIRING || st == PROV_IDLE) {
-        // QR the "ESP BLE Provisioning" app can scan to auto-fill name + PoP.
+    if (st == NET_PROVISIONING) {
+        // Already provisioning: show the QR to pair with.
         lv_obj_t *qr = lv_qrcode_create(page);
         lv_qrcode_set_size(qr, 88);
         lv_qrcode_set_dark_color(qr, lv_color_black());
@@ -295,11 +305,11 @@ static void wifi_setup_cb(lv_event_t *e)
         snprintf(buf, sizeof(buf), "%s  PoP %s",
                  provisioning_service_name(), provisioning_pop());
         page_text(page, buf);
+    } else if (st == NET_STA_CONNECTED) {
+        page_text(page, "WiFi connected.\n\nUse Forget WiFi to\nchange network.");
     } else {
-        const char *msg = (st == PROV_CONNECTED)  ? "WiFi connected.\n\nUse Forget WiFi to\nchange network."
-                        : (st == PROV_CONNECTING) ? "Connecting..."
-                        :                           "Not connected.\n\nUse Forget WiFi to\nre-pair.";
-        page_text(page, msg);
+        page_text(page, "Start pairing to add\nhome WiFi. The device\nreboots into setup.");
+        page_button(page, LV_SYMBOL_WIFI " Start pairing", wifi_setup_start_cb);
     }
 
     lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
@@ -579,47 +589,27 @@ static void vib_cb(lv_event_t *e)
 
 static lv_obj_t     *s_ap_label;
 static lv_timer_t   *s_ap_timer;
-static char          s_ap_ssid[20], s_ap_pass[16];
-static volatile bool s_ap_busy;
 
+// The manager owns the SoftAP lifecycle now; the UI just requests start/stop and
+// reflects state. Creds are read from apmode once the session is up.
 static void ap_update(lv_timer_t *t)
 {
     (void)t;
     if (!s_ap_label) return;
-    if (!apmode_active() || s_ap_ssid[0] == '\0') {
+    if (netmgr_state() != NET_SOFTAP || !apmode_active() || apmode_ssid()[0] == '\0') {
         lv_label_set_text(s_ap_label, "Starting SoftAP...\n(a few seconds)");
         return;
     }
     lv_label_set_text_fmt(s_ap_label,
         "Join WiFi:\n%s\npass: %s\n\nhttp://192.168.4.1:8080\n\nclients: %d",
-        s_ap_ssid, s_ap_pass, apmode_clients());
-}
-
-// Bringing the AP up/down blocks (~1.5 s BLE-settle, Wi-Fi mode switch), so do it
-// off the LVGL task or the UI freezes.
-static void filesync_start_task(void *arg)
-{
-    (void)arg;
-    apmode_start(s_ap_ssid, sizeof(s_ap_ssid), s_ap_pass, sizeof(s_ap_pass));
-    filesrv_start();
-    s_ap_busy = false;
-    vTaskDelete(NULL);
-}
-
-static void filesync_stop_task(void *arg)
-{
-    (void)arg;
-    filesrv_stop();                      // stop HTTP server (SD stays mounted)
-    apmode_stop();                       // revert to home Wi-Fi
-    s_ap_busy = false;
-    vTaskDelete(NULL);
+        apmode_ssid(), apmode_pass(), apmode_clients());
 }
 
 static void filesync_back_cb(lv_event_t *e)
 {
     if (s_ap_timer) { lv_timer_delete(s_ap_timer); s_ap_timer = NULL; }
     s_ap_label = NULL;
-    if (!s_ap_busy) { s_ap_busy = true; xTaskCreate(filesync_stop_task, "apstop", 4096, NULL, 5, NULL); }
+    netmgr_request_stop_softap();        // manager tears down + restores base mode
     back_cb(e);
 }
 
@@ -629,10 +619,9 @@ static void filesync_cb(lv_event_t *e)
     lv_obj_t *page = page_shell("File Sync");
     lv_obj_set_scroll_dir(page, LV_DIR_VER);
 
-    s_ap_ssid[0] = s_ap_pass[0] = '\0';
     s_ap_label = page_text(page, "Starting SoftAP...");
     s_ap_timer = lv_timer_create(ap_update, 500, NULL);
-    if (!s_ap_busy) { s_ap_busy = true; xTaskCreate(filesync_start_task, "apstart", 4096, NULL, 5, NULL); }
+    netmgr_request_softap();             // manager brings up SoftAP + file server
 
     lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Stop & Back", filesync_back_cb);
     lv_screen_load(page);

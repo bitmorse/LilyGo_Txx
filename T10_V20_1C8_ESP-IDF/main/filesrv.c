@@ -2,7 +2,7 @@
 #include "manifest.h"
 #include "sdcard.h"
 #include "provisioning.h"
-#include "blesync.h"
+#include "netmgr.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -317,7 +317,7 @@ static esp_err_t h_stop(httpd_req_t *req)
     ESP_LOGI(TAG, "session stop requested");
     s_token[0] = '\0';                          // invalidate
     httpd_resp_sendstr(req, "stopping");
-    blesync_teardown_wifi();                    // stop SoftAP+server, restart BLE (own task)
+    netmgr_request_stop_softap();               // manager stops SoftAP+server, restores base mode
     return ESP_OK;
 }
 

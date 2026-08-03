@@ -1,41 +1,42 @@
-// WiFi credential provisioning over BLE (ESP-IDF wifi_provisioning + NimBLE).
-// On first boot (no saved creds) the device advertises over BLE; the Espressif
-// "ESP BLE Provisioning" app sends the home WiFi SSID + password, which are
-// stored in NVS and used to connect automatically thereafter.
+// Low-level WiFi + BLE-provisioning mechanism. The STATE (when to connect, when to
+// provision, when to raise a SoftAP) is owned by netmgr.c -- this module only
+// provides the primitives it drives, plus the wall-clock/time helpers and the
+// getters the UI reads. The WiFi/IP/PROV event handler here just forwards events
+// to netmgr_post_event(); it makes no policy decisions.
 #pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
 
-typedef enum {
-    PROV_IDLE,        // not started
-    PROV_PAIRING,     // advertising over BLE, waiting for the app
-    PROV_CONNECTING,  // credentials received, joining WiFi
-    PROV_CONNECTED,   // WiFi connected (has IP)
-    PROV_FAILED,      // wrong password / AP not found
-} prov_state_t;
+// One-time hardware bring-up: NVS, netif, event loop, esp_wifi_init, STA netif,
+// event handlers, service name. Does NOT set a mode, start WiFi, or start BLE --
+// netmgr decides that. Call once at boot, before netmgr_start().
+void provisioning_hw_init(void);
 
-// Init NVS + WiFi + netif, then either connect (if already provisioned) or start
-// BLE provisioning. Call once at startup (replaces wifi_scan_init()).
-void provisioning_init(void);
+// --- STA mechanism (called by netmgr) ---
+bool provisioning_has_creds(void);      // stored home-WiFi SSID present
+void provisioning_sta_connect(void);    // STA mode + start + connect (fresh attempt)
+void provisioning_sta_reconnect(void);  // retry connect on the running STA
+void provisioning_sta_disconnect(void); // drop the STA link (before raising SoftAP)
+void provisioning_start_sntp(void);     // start SNTP once (on first GOT_IP)
 
-prov_state_t provisioning_state(void);
-const char  *provisioning_service_name(void);   // BLE device name shown in the app
-const char  *provisioning_pop(void);            // proof-of-possession code
+// --- BLE WiFi-provisioning mechanism (called by netmgr; boot-only mode) ---
+void provisioning_prov_start(void);     // init + start wifi_prov_mgr over BLE
+void provisioning_prov_stop(void);      // stop + deinit the provisioning manager
 
-bool provisioning_is_connected(void);           // WiFi connected (has IP)
-bool provisioning_sync_mode(void);              // true = no creds -> BLE sync + SoftAP
-void provisioning_ssid(char *buf, int n);       // connected SSID (empty if none)
-int  provisioning_rssi(void);                    // AP signal in dBm (0 if not connected)
+// --- persistence ---
+bool provisioning_prov_pending(void);          // "reboot into provisioning" flag
+void provisioning_set_prov_pending(bool on);
+void provisioning_forget(void);                // erase stored STA credentials
 
-// Erase stored credentials and reboot into BLE pairing mode ("Setup WiFi" again).
-void provisioning_reset_and_restart(void);
+// --- state mirror for the UI (set by netmgr) ---
+void provisioning_set_connected(bool on);
+bool provisioning_is_connected(void);          // WiFi connected (has IP)
+void provisioning_ssid(char *buf, int n);      // connected SSID (empty if none)
+int  provisioning_rssi(void);                   // AP signal dBm (0 if not connected)
+const char *provisioning_service_name(void);   // BLE name shown in the ESP prov app
+const char *provisioning_pop(void);            // proof-of-possession code
 
-// Stop BLE provisioning advertising (if active). Called when entering SoftAP file
-// sync: SoftAP + active BLE is unstable on the classic ESP32, so the advertising
-// must stop or it interrupts the Wi-Fi transfer. One-way until reboot.
-void provisioning_stop_ble(void);
-
-// Wall-clock time, sourced from SNTP once WiFi is up (started on first GOT_IP).
+// --- wall-clock time (SNTP once WiFi is up) ---
 bool     time_is_synced(void);   // true once NTP has set the RTC
 uint64_t time_now_ns(void);      // UTC ns if synced, else monotonic esp_timer ns

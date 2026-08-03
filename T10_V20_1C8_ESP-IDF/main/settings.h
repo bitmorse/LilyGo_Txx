@@ -1,5 +1,5 @@
 // Persistent user settings (stored in NVS). Load once at boot with
-// settings_init() (after NVS is initialised by provisioning_init()).
+// settings_init() (after NVS is initialised by provisioning_hw_init()).
 #pragma once
 
 #include <stdbool.h>

@@ -22,15 +22,13 @@
 #include "st7735.h"
 #include "buttons.h"
 #include "provisioning.h"
+#include "netmgr.h"
 #include "power.h"
 #include "sound.h"
 #include "imu.h"
 #include "lvgl_port.h"
 #include "ui_menu.h"
 #include "settings.h"
-#include "blesync.h"
-#include "apmode.h"
-#include "filesrv.h"
 #include "boot_image.h"
 
 static const char *TAG = "app";
@@ -44,7 +42,7 @@ void app_main(void)
     buttons_init();
     sound_init();
     imu_init();
-    provisioning_init();   // NVS + WiFi + BLE provisioning (or auto-connect)
+    provisioning_hw_init();// NVS + netif + esp_wifi_init (no mode/start yet)
     settings_init();       // load user prefs (needs NVS, inited above)
 
     // Boot splash image, and the cute melody only if enabled in Settings.
@@ -59,43 +57,28 @@ void app_main(void)
     lvgl_port_unlock();
 
     // The SD card + file server are started ON DEMAND (File Sync / Vibration Log),
-    // never at boot: a corrupt card must not be able to brick booting. Both modes
-    // sd_mount() (idempotent) and neither unmounts, so they never race the mount.
+    // never at boot: a corrupt card must not be able to brick booting.
 
-    // In sync mode (no WiFi creds), start the BLE control channel so a phone can
-    // discover the device, trigger SoftAP, and get the handoff.
-    if (provisioning_sync_mode())
-        blesync_start();
+    // The connectivity state manager owns everything WiFi/BLE from here: it picks
+    // the initial mode (STA / sync / provisioning) and arbitrates all transitions
+    // and the SoftAP session lifecycle (see netmgr.c).
+    netmgr_start();
 
     // app_main idles; LVGL runs in its own task. Keep a serial heartbeat.
     int64_t last_beat = 0;
     while (1) {
         int64_t now = esp_timer_get_time();
-
-        // Sync-session watchdog: if a SoftAP was raised (via BLE or the menu) but
-        // nobody joined for 2 min, or there's been no HTTP traffic for 5 min, tear
-        // it down and return to the SYNC_IDLE state (BLE advertising, Wi-Fi idle).
-        if (apmode_active() &&
-            (apmode_no_client_ms() > 120000 || filesrv_idle_ms() > 300000)) {
-            ESP_LOGW(TAG, "SoftAP unused -> teardown to sync-idle");
-            filesrv_stop();
-            apmode_stop();
-            blesync_start();               // BLE was freed for the transfer; bring it back
-        }
-
         if (now - last_beat > 5 * 1000 * 1000) {   // every 5 s
             last_beat = now;
-            wifi_ap_record_t ap;
-            bool conn = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
             char ip[16] = "-";
             esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
             esp_netif_ip_info_t ipi;
             if (sta && esp_netif_get_ip_info(sta, &ipi) == ESP_OK && ipi.ip.addr)
                 snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ipi.ip));
-            ESP_LOGI(TAG, "alive: uptime %llus, heap %u, wifi %s rssi %d ip %s",
+            ESP_LOGI(TAG, "alive: uptime %llus, heap %u, state %s ip %s",
                      (unsigned long long)(now / 1000000),
                      (unsigned)esp_get_free_heap_size(),
-                     conn ? "UP" : "down", conn ? ap.rssi : 0, ip);
+                     netmgr_state_str(netmgr_state()), ip);
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }

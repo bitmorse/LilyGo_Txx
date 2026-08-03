@@ -9,6 +9,7 @@ idf_component_register(
         "i2c_bus.c"
         "imu.c"
         "provisioning.c"
+        "netmgr.c"
         "airport.c"
         "audio.c"
         "radio.c"
