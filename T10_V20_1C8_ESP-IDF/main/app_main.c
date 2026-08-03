@@ -28,6 +28,7 @@
 #include "lvgl_port.h"
 #include "ui_menu.h"
 #include "settings.h"
+#include "blesync.h"
 #include "boot_image.h"
 
 static const char *TAG = "app";
@@ -58,6 +59,11 @@ void app_main(void)
     // The SD card + file server are started ON DEMAND (File Sync / Vibration Log),
     // never at boot: a corrupt card must not be able to brick booting. Both modes
     // sd_mount() (idempotent) and neither unmounts, so they never race the mount.
+
+    // In sync mode (no WiFi creds), start the BLE control channel so a phone can
+    // discover the device, trigger SoftAP, and get the handoff.
+    if (provisioning_sync_mode())
+        blesync_start();
 
     // app_main idles; LVGL runs in its own task. Keep a serial heartbeat.
     int64_t last_beat = 0;

@@ -23,6 +23,9 @@ static const char *TAG = "prov";
 static prov_state_t s_state = PROV_IDLE;
 static char s_service_name[20] = "T10_????";
 static int  s_retries = 0;
+static bool s_sync_mode = false;    // true = no WiFi creds; run blesync + SoftAP
+
+bool provisioning_sync_mode(void) { return s_sync_mode; }
 
 prov_state_t provisioning_state(void)        { return s_state; }
 const char  *provisioning_service_name(void) { return s_service_name; }
@@ -158,30 +161,24 @@ void provisioning_init(void)
 
     make_service_name();
 
-    // Provisioning manager, BLE transport. FREE_BTDM releases the BT/BLE memory
-    // once provisioning ends, reclaiming RAM for normal operation.
-    wifi_prov_mgr_config_t mgr = {
-        .scheme = wifi_prov_scheme_ble,
-        .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM,
-    };
-    ESP_ERROR_CHECK(wifi_prov_mgr_init(mgr));
+    // Provisioned == stored STA credentials present.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    wifi_config_t staconf = {0};
+    esp_wifi_get_config(WIFI_IF_STA, &staconf);
+    bool provisioned = staconf.sta.ssid[0] != '\0';
 
-    bool provisioned = false;
-    ESP_ERROR_CHECK(wifi_prov_mgr_is_provisioned(&provisioned));
-
-    if (!provisioned) {
-        ESP_LOGI(TAG, "not provisioned -> starting BLE pairing");
-        s_state = PROV_PAIRING;
-        wifi_prov_security_t security = WIFI_PROV_SECURITY_1;
-        ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(
-            security, PROV_POP, s_service_name, NULL));
-        // manager runs in the background; it releases BLE when done.
-    } else {
-        ESP_LOGI(TAG, "already provisioned -> connecting");
-        wifi_prov_mgr_deinit();
+    if (provisioned) {
+        ESP_LOGI(TAG, "provisioned -> connecting to '%s'", (char *)staconf.sta.ssid);
         s_state = PROV_CONNECTING;
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_start());   // STA_START handler connects
+    } else {
+        // Sync mode (field default): no WiFi provisioning. NimBLE is left free for
+        // the sync GATT service (blesync), started by app_main. WiFi is up so a
+        // SoftAP can be raised on demand; STA stays idle (no creds).
+        ESP_LOGI(TAG, "not provisioned -> sync mode (BLE sync + on-demand SoftAP)");
+        s_state = PROV_IDLE;
+        s_sync_mode = true;
+        ESP_ERROR_CHECK(esp_wifi_start());
     }
 }
 
@@ -206,11 +203,7 @@ void provisioning_reset_and_restart(void)
 
 void provisioning_stop_ble(void)
 {
-    // Only meaningful while advertising for pairing; if already provisioned the
-    // BLE stack was released after connect, so there's nothing to stop.
-    if (s_state == PROV_PAIRING || s_state == PROV_IDLE) {
-        ESP_LOGI(TAG, "stopping BLE provisioning for SoftAP file sync");
-        wifi_prov_mgr_stop_provisioning();
-        s_state = PROV_IDLE;
-    }
+    // No-op: the device no longer runs the WiFi-provisioning BLE manager (sync mode
+    // uses the blesync GATT service instead). Kept so callers (apmode_start) that
+    // predate blesync still link.
 }

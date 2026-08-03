@@ -20,6 +20,7 @@ idf_component_register(
         "filesrv.c"
         "apmode.c"
         "settings.c"
+        "blesync.c"
         "lvgl_port.c"
         "ui_menu.c"
     INCLUDE_DIRS "."

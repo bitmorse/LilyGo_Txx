@@ -24,6 +24,7 @@ const char  *provisioning_service_name(void);   // BLE device name shown in the 
 const char  *provisioning_pop(void);            // proof-of-possession code
 
 bool provisioning_is_connected(void);           // WiFi connected (has IP)
+bool provisioning_sync_mode(void);              // true = no creds -> BLE sync + SoftAP
 void provisioning_ssid(char *buf, int n);       // connected SSID (empty if none)
 int  provisioning_rssi(void);                    // AP signal in dBm (0 if not connected)
 
