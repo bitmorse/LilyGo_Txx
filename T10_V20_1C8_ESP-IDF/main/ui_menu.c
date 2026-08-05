@@ -16,6 +16,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>       // setenv (timezone for the watchface clock)
+#include <time.h>         // localtime_r / strftime for the watchface clock
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
@@ -705,39 +707,57 @@ static void reboot_cb(lv_event_t *e)
 
 // --- UART RX on GPIO21 (9600 8N1) -------------------------------------------
 
-static lv_obj_t   *s_uart_label;
-static lv_obj_t   *s_uart_btn_label;
-static lv_timer_t *s_uart_timer;
+static lv_obj_t      *s_uart_label;
+static lv_timer_t    *s_uart_timer;
+static uartrx_state_t s_uart_last_st;
+static unsigned       s_uart_last_bytes;
+static uint32_t       s_uart_activity_tick;   // lv_tick at the last state/byte change
+
+#define UART_IDLE_CLOSE_MS (3600u * 1000u)    // auto-leave after 1 h with no activity
+
+static void uart_back_cb(lv_event_t *e);      // fwd decl (defined below)
 
 static void uart_update(lv_timer_t *t)
 {
     (void)t;
     if (!s_uart_label) return;
     uartrx_state_t st = uartrx_state();
-    char body[200];
+
+    // Auto-close the page after an hour of no activity (no state change and no new
+    // bytes). Active recording keeps resetting the clock, so a docked tool won't close.
+    unsigned bytes = uartrx_bytes();
+    if (st != s_uart_last_st || bytes != s_uart_last_bytes) {
+        s_uart_last_st = st;
+        s_uart_last_bytes = bytes;
+        s_uart_activity_tick = lv_tick_get();
+    } else if (lv_tick_elaps(s_uart_activity_tick) > UART_IDLE_CLOSE_MS) {
+        uart_back_cb(NULL);                    // stop recording + return to the menu
+        return;
+    }
+    char body[128];
     int off;
     switch (st) {
     case UARTRX_WAIT:
-        off = snprintf(body, sizeof(body), "WAIT\n\nWaiting for tool…\nGPIO21 HIGH (no tool)");
+        off = snprintf(body, sizeof(body), "WAIT - waiting for tool");
         break;
     case UARTRX_CHARGING:
-        off = snprintf(body, sizeof(body), "CHARGING\n\nTool inserted (LOW)\ncharging %lds / 600s",
+        off = snprintf(body, sizeof(body), "CHARGING - %lds / 600s",
                        (long)(uartrx_state_elapsed_ms() / 1000));
         break;
-    case UARTRX_DATA: {
-        char hex[3 * 8 + 1];
-        uartrx_last_hex(hex, sizeof(hex));
-        off = snprintf(body, sizeof(body), "DATA\n\nbytes: %u\nlast: %s",
-                       uartrx_bytes(), hex[0] ? hex : "-");
+    case UARTRX_DATA:
+        off = snprintf(body, sizeof(body), "DATA - receiving");
         break;
-    }
     case UARTRX_FAULT:
-        off = snprintf(body, sizeof(body), "FAULT\n\nNo UART after 10 min\ncheck / replace tool");
+        off = snprintf(body, sizeof(body), "FAULT - no UART, check tool");
         break;
     default:
-        off = snprintf(body, sizeof(body), "REST\n\nGPIO21 @ 9600 8N1\nPress Start to arm");
+        off = snprintf(body, sizeof(body), "REST - idle");
         break;
     }
+    if (off < 0 || off >= (int)sizeof(body)) off = (int)sizeof(body) - 1;
+
+    // Bytes-received counter (running total for the session).
+    off += snprintf(body + off, sizeof(body) - off, "\nrx %u B", bytes);
     if (off < 0 || off >= (int)sizeof(body)) off = (int)sizeof(body) - 1;
 
     // Recording footer (same file spans the whole session).
@@ -745,31 +765,18 @@ static void uart_update(lv_timer_t *t)
     if (p[0]) {
         const char *base = strrchr(p, '/');
         base = base ? base + 1 : p;
-        snprintf(body + off, sizeof(body) - off, "\n\nrec %s  %lluKB",
+        snprintf(body + off, sizeof(body) - off, "\nrec %s  %lluKB",
                  base, (unsigned long long)(uartrx_rec_bytes() / 1024));
     } else {
-        snprintf(body + off, sizeof(body) - off, "\n\nrec: off (no SD)");
+        snprintf(body + off, sizeof(body) - off, "\nrec: off (no SD)");
     }
     lv_label_set_text(s_uart_label, body);
-
-    if (s_uart_btn_label)
-        lv_label_set_text(s_uart_btn_label,
-            st == UARTRX_REST ? LV_SYMBOL_PLAY " Start"
-                              : LV_SYMBOL_STOP " Stop");
-}
-
-static void uart_toggle_cb(lv_event_t *e)
-{
-    (void)e;
-    if (uartrx_state() == UARTRX_REST) uartrx_start();
-    else                               uartrx_stop();
-    uart_update(NULL);
 }
 
 static void uart_back_cb(lv_event_t *e)
 {
     if (s_uart_timer) { lv_timer_delete(s_uart_timer); s_uart_timer = NULL; }
-    s_uart_label = s_uart_btn_label = NULL;
+    s_uart_label = NULL;
     uartrx_stop();                       // leave the page in the REST state
     back_cb(e);
 }
@@ -778,22 +785,20 @@ static void uart_cb(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *page = page_shell("UART RX");
-    s_uart_label = page_text(page, "State: REST");
+    s_uart_label = page_text(page, "UART RX");
 
-    lv_obj_t *b = lv_button_create(page);
-    lv_obj_set_width(b, lv_pct(100));
-    s_uart_btn_label = lv_label_create(b);
-    lv_obj_center(s_uart_btn_label);
-    lv_obj_add_event_cb(b, uart_toggle_cb, LV_EVENT_CLICKED, NULL);
-    page_focus_stop(b);
-
-    uartrx_start();                      // arm + begin recording on page entry
+    // Recording auto-starts on page entry; no toggle button. The page auto-closes
+    // after UART_IDLE_CLOSE_MS of no activity (see uart_update).
+    uartrx_start();
+    s_uart_last_st       = uartrx_state();
+    s_uart_last_bytes    = uartrx_bytes();
+    s_uart_activity_tick = lv_tick_get();
     uart_update(NULL);
     s_uart_timer = lv_timer_create(uart_update, 300, NULL);
 
-    page_button(page, LV_SYMBOL_LEFT " Back", uart_back_cb);
+    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", uart_back_cb);
     lv_screen_load(page);
-    lv_group_focus_obj(b);
+    lv_group_focus_obj(back);
 }
 
 // --- main menu builders -----------------------------------------------------
@@ -829,11 +834,140 @@ static void passkey_poll(lv_timer_t *t)
     if (!k && box) { lv_obj_delete(box); box = NULL; }
 }
 
-void ui_menu_start(void)
-{
-    s_main_scr = lv_screen_active();
-    lv_obj_t *scr = s_main_scr;
+// --- watchface home ---------------------------------------------------------
+// Landing screen is a smartwatch-style clock; the app menu is a separate screen
+// reached by pressing the "Apps" activator (the one focusable widget here). The
+// encoder is linear, so navigation is press-to-enter / rotate-to-scroll.
 
+static lv_obj_t *s_watch_scr;                 // boot/landing screen (the clock)
+static lv_obj_t *s_watch_btn;                 // sole focusable widget -> opens apps
+static lv_obj_t *s_clock_lbl, *s_date_lbl;
+static lv_obj_t *s_state_lbl;                 // status bar: device FSM state
+
+// Friendly one-word label + colour for each netmgr (device state machine) state.
+static const char *state_word(net_state_t s, uint32_t *color)
+{
+    switch (s) {
+    case NET_STA_CONNECTED: *color = 0x37C8B4; return "Online";
+    case NET_SOFTAP:        *color = 0x37C8B4; return "Hotspot";
+    case NET_WLAN_SERVE:    *color = 0x37C8B4; return "Serving";
+    case NET_STA_CONNECTING:*color = 0xE0A030; return "Connecting";
+    case NET_VERIFYING:     *color = 0xE0A030; return "Verifying";
+    case NET_STA_FAILED:    *color = 0xE64A4A; return "WiFi failed";
+    case NET_SYNC_IDLE:     *color = 0x8A93A0; return "Idle";
+    default:                *color = 0x8A93A0; return "Booting";
+    }
+}
+
+// Refresh the status bar from the state machine: "<state>  <mode>" (+ paired dot).
+static void status_bar_update(void)
+{
+    if (!s_state_lbl) return;
+    uint32_t c;
+    const char *w = state_word(netmgr_state(), &c);
+    lv_label_set_text_fmt(s_state_lbl, "%s  %s%s", w,
+                          settings_wlan_mode() ? "WLAN" : "BLE",
+                          blesync_is_paired() ? "  " LV_SYMBOL_OK : "");
+    lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(c), 0);
+}
+
+// Swap the encoder group + active screen between the watchface and the app list.
+static void show_apps(void)
+{
+    lv_group_t *g = lvgl_port_group();
+    lv_group_remove_all_objs(g);
+    for (int i = 0; i < s_focus_n; i++) lv_group_add_obj(g, s_focus[i]);
+    lv_group_focus_obj(s_focus[s_focus_n > 1 ? 1 : 0]);   // land on the first app
+    lv_screen_load(s_main_scr);
+}
+
+static void show_watch(void)
+{
+    lv_group_t *g = lvgl_port_group();
+    lv_group_remove_all_objs(g);
+    lv_group_add_obj(g, s_watch_btn);
+    lv_group_focus_obj(s_watch_btn);
+    lv_screen_load(s_watch_scr);
+}
+
+static void open_apps_cb(lv_event_t *e) { (void)e; show_apps(); }
+static void home_cb(lv_event_t *e)      { (void)e; show_watch(); }
+
+static void watch_update(lv_timer_t *t)
+{
+    (void)t;
+    status_bar_update();                       // device FSM state (shown on the home)
+    if (!s_clock_lbl) return;
+    if (time_is_synced()) {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        lv_label_set_text_fmt(s_clock_lbl, "%02d:%02d", tm.tm_hour, tm.tm_min);
+        char d[24];
+        strftime(d, sizeof(d), "%a %d %b", &tm);
+        lv_label_set_text(s_date_lbl, d);
+    } else {
+        lv_label_set_text(s_clock_lbl, "--:--");
+        lv_label_set_text(s_date_lbl, "no time yet");
+    }
+}
+
+static void build_watchface(void)
+{
+    lv_obj_t *scr = s_watch_scr;
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0B0E11), 0);
+    lv_obj_set_style_text_color(scr, lv_color_hex(0xE6EAEE), 0);
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(scr, 4, 0);
+    lv_obj_set_style_pad_row(scr, 6, 0);
+
+    // Status bar: the device state-machine state + mode (updated live).
+    s_state_lbl = lv_label_create(scr);
+    lv_obj_set_width(s_state_lbl, lv_pct(100));
+    lv_obj_set_style_text_align(s_state_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_state_lbl, "");
+
+    // Status row (wifi text + signal bars) at the top.
+    lv_obj_t *wrow = lv_obj_create(scr);
+    lv_obj_remove_style_all(wrow);
+    lv_obj_set_size(wrow, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(wrow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wrow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_END);
+    lv_obj_set_style_pad_column(wrow, 5, 0);
+    s_wifi_status = lv_label_create(wrow);
+    lv_obj_set_style_text_font(s_wifi_status, &lv_font_montserrat_14, 0);
+    s_wifi_bars = make_wifi_bars(wrow);
+
+    // Big clock + date.
+    s_clock_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_clock_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_clock_lbl, lv_color_hex(0x37C8B4), 0);
+    lv_label_set_text(s_clock_lbl, "--:--");
+    s_date_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_color(s_date_lbl, lv_color_hex(0x8A93A0), 0);
+    lv_label_set_text(s_date_lbl, "");
+
+    // Device name.
+    lv_obj_t *dev = lv_label_create(scr);
+    lv_obj_set_style_text_color(dev, lv_color_hex(0x8A93A0), 0);
+    lv_label_set_text(dev, provisioning_service_name());
+
+    // The one focusable widget: press to open the app list.
+    s_watch_btn = lv_button_create(scr);
+    lv_obj_set_width(s_watch_btn, lv_pct(100));
+    lv_obj_t *bl = lv_label_create(s_watch_btn);
+    lv_label_set_text(bl, "Apps " LV_SYMBOL_DOWN);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(s_watch_btn, open_apps_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void build_app_list(void)
+{
+    s_main_scr = lv_obj_create(NULL);         // off-screen until show_apps()
+    lv_obj_t *scr = s_main_scr;
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), 0);
     lv_obj_set_style_text_color(scr, lv_color_hex(0xE6EAEE), 0);
     lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
@@ -844,38 +978,40 @@ void ui_menu_start(void)
     lv_obj_set_scroll_dir(scr, LV_DIR_VER);
 
     lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "T10 V2.0");
+    lv_label_set_text(title, "Apps");
     lv_obj_set_style_text_color(title, lv_color_hex(0x37C8B4), 0);
 
-    // Live WiFi status + signal bars (replaces the old no-op WiFi switch).
-    lv_obj_t *wrow = lv_obj_create(scr);
-    lv_obj_remove_style_all(wrow);
-    lv_obj_set_size(wrow, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(wrow, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(wrow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END,
-                          LV_FLEX_ALIGN_END);
-    lv_obj_set_style_pad_column(wrow, 5, 0);
-    s_wifi_status = lv_label_create(wrow);
-    lv_obj_set_style_text_font(s_wifi_status, &lv_font_montserrat_14, 0);
-    s_wifi_bars = make_wifi_bars(wrow);
-    wifi_status_update(NULL);
-    lv_timer_create(wifi_status_update, 2000, NULL);
-    lv_timer_create(passkey_poll, 300, NULL);   // BLE pairing code overlay
-
-    // Actions -> sub-pages.
+    // s_focus[0] = return to the clock; the rest are the apps.
+    make_button(scr, LV_SYMBOL_HOME " Clock", home_cb);
+    make_button(scr, "UART RX " LV_SYMBOL_RIGHT, uart_cb);
     make_button(scr, "ZRH Traffic " LV_SYMBOL_RIGHT, airport_cb);
     make_button(scr, "Radio " LV_SYMBOL_RIGHT, radio_cb);
     make_button(scr, "Audio Clips " LV_SYMBOL_RIGHT, audio_clips_cb);
     make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
     make_button(scr, "Vibration Log " LV_SYMBOL_RIGHT, vib_cb);
     make_button(scr, "File Sync " LV_SYMBOL_RIGHT, filesync_cb);
-    make_button(scr, "UART RX " LV_SYMBOL_RIGHT, uart_cb);
     make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
     make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Setup WiFi " LV_SYMBOL_RIGHT, wifi_setup_cb);
     make_button(scr, "Settings " LV_SYMBOL_RIGHT, settings_cb);
     make_button(scr, "Forget WiFi", repair_cb);
     make_button(scr, "Reboot", reboot_cb);
+}
 
-    if (s_focus_n) lv_group_focus_obj(s_focus[0]);
+void ui_menu_start(void)
+{
+    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);   // Zurich local time; tune as needed
+    tzset();
+
+    build_app_list();                          // off-screen; fills s_focus[]
+    s_watch_scr = lv_screen_active();          // boot screen becomes the watchface
+    build_watchface();
+
+    wifi_status_update(NULL);
+    watch_update(NULL);
+    lv_timer_create(wifi_status_update, 2000, NULL);
+    lv_timer_create(watch_update, 1000, NULL);
+    lv_timer_create(passkey_poll, 300, NULL);   // BLE pairing code overlay
+
+    show_watch();                              // land on the clock
 }
