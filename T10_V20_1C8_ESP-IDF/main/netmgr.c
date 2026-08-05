@@ -71,6 +71,21 @@ const char *netmgr_state_str(net_state_t s)
     }
 }
 
+// Full device-state snapshot for the app (BLE info READ + status NOTIFY).
+int netmgr_status_json(char *out, int cap)
+{
+    char ip[16];
+    get_sta_ip(ip, sizeof(ip));
+    return snprintf(out, cap,
+        "{\"state\":\"%s\",\"provisioned\":%s,\"paired\":%s,\"mode\":\"%s\","
+        "\"ip\":\"%s\",\"dev\":\"%s\"}",
+        netmgr_state_str(s_state),
+        provisioning_has_creds() ? "true" : "false",
+        blesync_is_paired()      ? "true" : "false",
+        settings_wlan_mode()     ? "wlan" : "ble",
+        ip, provisioning_service_name());
+}
+
 static void post(msg_t m)
 {
     // Bounded wait, never portMAX_DELAY: post() runs in WiFi/BLE event-task context,
@@ -221,6 +236,7 @@ static void handle(msg_t m)
                 enter_sync();
             }
         }
+        blesync_notify_status();
         ESP_LOGI(TAG, "pref_mode := %s", s_pend_wlan ? "WLAN" : "BLE");
         break;
 
@@ -246,6 +262,7 @@ static void handle(msg_t m)
             s_sta_retries = 0;
             provisioning_set_connected(true);
             provisioning_start_sntp();
+            blesync_notify_status();
             ESP_LOGI(TAG, "-> sta-connected");
         }
         break;

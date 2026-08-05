@@ -72,11 +72,20 @@ static void advertise(void);
 static int info_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)ch; (void)attr; (void)arg;
-    char json[160];
-    int n = snprintf(json, sizeof(json),
-        "{\"fw\":\"t10\",\"softap_ssid\":\"%s\",\"provisioned\":%s}",
-        s_name, provisioning_is_connected() ? "true" : "false");
+    char json[192];
+    int n = netmgr_status_json(json, sizeof(json));   // full device snapshot
     return os_mbuf_append(ctxt->om, json, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+// Push the device-state snapshot to the connected phone (netmgr calls this on state
+// transitions, best-effort -- only while BLE is up and a phone is connected).
+void blesync_notify_status(void)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    char json[192];
+    int n = netmgr_status_json(json, sizeof(json));
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(json, n);
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_status_val_handle, om);
 }
 
 // Notify the phone with the Wi-Fi handoff (SoftAP creds + server token). Public:

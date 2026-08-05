@@ -38,6 +38,10 @@ void netmgr_start(void);
 net_state_t netmgr_state(void);
 const char *netmgr_state_str(net_state_t s);
 
+// Full device-state snapshot JSON {state,provisioned,paired,mode,ip,dev} for the
+// app (served on the BLE info READ and pushed on the status NOTIFY). Returns length.
+int netmgr_status_json(char *out, int cap);
+
 // True once STA is connected with an IP -- the gate for internet features
 // (radio, ZRH traffic, SNTP). False in SoftAP / sync / verifying states.
 bool netmgr_internet_up(void);

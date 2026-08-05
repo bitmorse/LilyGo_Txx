@@ -33,6 +33,10 @@ void blesync_notify_wlan_handoff(const char *ip, int port, const char *token);
 // calls this after verification succeeds/fails).
 void blesync_notify_prov_result(bool ok, const char *err);
 
+// Push the full device-state snapshot to the connected phone (netmgr calls this on
+// state transitions).
+void blesync_notify_status(void);
+
 bool blesync_active(void);
 
 // True if a phone is BLE-bonded ("device added"). Only meaningful while BLE is up.
