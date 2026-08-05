@@ -57,15 +57,23 @@ Identity transitions (all **live, no reboot**):
   (see `[[ble-softap-heap-exclusive]]` / commit 656708d). SoftAP is only ever raised
   *transiently* for a bulk transfer, with BLE torn down for its duration, then
   restored. This is today's proven flow (`blesync_stop()` → transfer → `blesync_start()`).
-- **BLE + STA (station)** coexist on the radio; the only open question is **heap** —
-  validated in Stage 0. STA (no AP beacon/DHCP/multi-client) is far lighter than
-  SoftAP, so it is expected to fit where SoftAP did not.
+- **BLE + STA (station)** coexist with room to spare — **measured in Stage 0** on
+  hardware: BLE-only ≈ 60 KB free, **BLE + STA connected ≈ 55 KB free / 50 KB min**.
+  So BLE stays up in WLAN mode for control/presence.
+- **BUT the HTTP file server does not fit on top of BLE.** Also measured: bringing up
+  `filesrv` (httpd task + mDNS + the precache task + SD/FATFS) on top of BLE + STA
+  drops min-free to **~44–136 bytes** (near-OOM) and steady free to ~12 KB. The
+  oversized LWIP TCP buffers were **not** the cause (trimming them didn't help) — it's
+  the aggregate server bring-up. **Rule: BLE and the HTTP file server never run
+  together** — file *serving* (SoftAP *or* STA) tears BLE down for its duration, same
+  as today's SoftAP flow. Optional later optimization (defer precache, on-demand httpd,
+  smaller stacks) could relax this; not assumed by the design.
 
 ## Two transfer paths (the device is always in exactly one)
 
 | Path | When | Mechanics | BLE during transfer |
 |------|------|-----------|---------------------|
-| **WLAN** | S2 WLAN mode, S3 | file server on the **STA** interface, discovered via mDNS `t10.local:8080`; app pulls over the home LAN | stays up (if heap allows) |
+| **WLAN** | S2 WLAN mode, S3 | file server on the **STA** interface, discovered via mDNS `t10-XXXX.local:8080`; app pulls over the home LAN | **torn down** during the transfer (server can't coexist — Stage 0) |
 | **BLE**  | S0/S1, S2 BLE mode | BLE control → SoftAP handoff → bulk transfer | torn down transiently, restored after |
 
 The WLAN path is what removes "always manually sync" — the app just reaches the
@@ -245,4 +253,8 @@ decision logic is developed **red→green TDD** (like `uartrx_sm`).
 4. WLAN auth = **persistent per-bond token** (works even when BLE is down).
 5. Provisioning/pairing done by **the octanis-connect app over blesync** (not the
    Espressif app).
-6. **BLE-in-WLAN-mode** always-on vs on-demand: **decided by Stage 0's heap result.**
+6. **BLE-in-WLAN-mode** (Stage 0 result): BLE **stays up in idle WLAN mode** (control),
+   but the **HTTP file server never coexists with BLE** — file serving over STA or
+   SoftAP tears BLE down for the transfer, then restores it. So the WLAN win over
+   SoftAP is "phone keeps its network" (no SSID switch), not "BLE stays up during the
+   transfer."
