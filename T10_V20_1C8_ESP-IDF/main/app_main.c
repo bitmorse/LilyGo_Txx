@@ -30,6 +30,7 @@
 #include "ui_menu.h"
 #include "settings.h"
 #include "uartrx.h"
+#include "sdcard.h"
 #include "boot_image.h"
 
 static const char *TAG = "app";
@@ -58,8 +59,14 @@ void app_main(void)
     ui_menu_start();
     lvgl_port_unlock();
 
-    // The SD card + file server are started ON DEMAND (File Sync / Vibration Log),
-    // never at boot: a corrupt card must not be able to brick booting.
+    // Mount the SD card ONCE, here, after the UI is already up. Best-effort: a
+    // failed/absent/corrupt card just logs and boot continues (esp_vfs_fat_sdspi_mount
+    // returns an error rather than aborting, and format_if_mount_failed is off, so a
+    // bad card cannot brick booting). Doing the one heavy mount from this task means
+    // the on-demand consumers (uartrx, viblog, filesrv) hit sd_mount()'s early-out
+    // instead of running the deep mount on their own smaller task stacks -- which is
+    // what crashed the UART RX page when it had to mount the card itself.
+    if (!sd_mount()) ESP_LOGW(TAG, "SD not mounted at boot (no card?); features mount on demand");
 
     // The connectivity state manager owns everything WiFi/BLE from here: it picks
     // the initial mode (STA / sync / provisioning) and arbitrates all transitions

@@ -57,8 +57,21 @@ static FILE                   *s_fp;
 static mcap_writer_t           s_mcap;
 static char                    s_rec_path[40];
 static volatile uint64_t       s_rec_bytes;
+static bool                    s_rec_walltime;      // latched at rec_open (see rec_now_ns)
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+
+// Per-file latched MCAP timestamp. The clock base is decided ONCE, when the
+// file is opened, and every message in that file uses it -- so a file's timeline
+// never jumps. If the RTC was already synced at rec_open we stamp UTC (and it
+// stays synced); otherwise we stamp monotonic since-boot for the whole file,
+// even if SNTP lands mid-recording. Using time_now_ns() directly would flip a
+// file from boot-relative to UTC mid-stream (a ~56-year jump Foxglove can't plot).
+static uint64_t rec_now_ns(void)
+{
+    return s_rec_walltime ? time_now_ns()
+                          : (uint64_t)esp_timer_get_time() * 1000ULL;
+}
 
 uartrx_state_t uartrx_state(void)         { return s_state; }
 unsigned       uartrx_bytes(void)         { return s_bytes; }
@@ -154,7 +167,7 @@ static void rec_write_state(uartrx_state_t st)
     char json[80];
     int n = uartrx_rec_state_json(json, sizeof(json), uartrx_state_str(st),
                                   s_bytes, (long long)(now_ms() - s_since_ms));
-    uint64_t t = time_now_ns();
+    uint64_t t = rec_now_ns();
     if (mcap_write_message(&s_mcap, CH_STATE, t, t, (const uint8_t *)json, n))
         s_rec_bytes += (uint64_t)n + 22;
 }
@@ -172,13 +185,17 @@ static void rec_open(void)
     mcap_add_channel(&s_mcap, CH_STATE, 0, "/state",   "json");
     mcap_add_channel(&s_mcap, CH_META,  0, "/meta",    "json");
     s_rec_bytes = 0;
+    // Latch the clock base for the whole file (see rec_now_ns). The /meta
+    // "time_synced" flag records which base this file uses: true = UTC, false =
+    // monotonic since-boot.
+    s_rec_walltime = time_is_synced();
 
     char meta[128];
     const esp_app_desc_t *app = esp_app_get_description();
     int mn = uartrx_rec_meta_json(meta, sizeof(meta), app->version,
                                   provisioning_service_name(), UART_BAUD, RX_GPIO,
-                                  time_is_synced());
-    uint64_t t = time_now_ns();
+                                  s_rec_walltime);
+    uint64_t t = rec_now_ns();
     mcap_write_message(&s_mcap, CH_META, t, t, (const uint8_t *)meta, mn);
     rec_write_state(s_sm.state);
     ESP_LOGI(TAG, "recording -> %s", s_rec_path);
@@ -193,7 +210,7 @@ static void rec_write_uart(const uint8_t *buf, int n)
     char json[368];
     int jn = uartrx_rec_uart_b64(json, sizeof(json), buf, n);
     if (jn <= 0) return;                            // refused (won't fit) -- skip
-    uint64_t t = time_now_ns();
+    uint64_t t = rec_now_ns();
     if (mcap_write_message(&s_mcap, CH_UART, t, t, (const uint8_t *)json, (uint32_t)jn))
         s_rec_bytes += (uint64_t)jn + 22;
 }
@@ -299,9 +316,12 @@ void uartrx_start(void)
     s_state = s_sm.state;
     s_since_ms = s_sm.since_ms;
     s_run = true;
-    // 6144: the monitor task now writes MCAP to SD (fwrite -> FATFS -> sdspi is a
-    // deep call chain, like viblog's writer at 8192) on top of the 256 B read buffer.
-    xTaskCreate(monitor_task, "uartrx", 6144, NULL, 5, &s_task);
+    // 8192: matches viblog's writer. The monitor task writes MCAP to SD (fwrite ->
+    // FATFS -> sdspi, a deep chain) on top of the 256 B read buffer, and -- if the
+    // card was not already mounted at boot -- runs the even deeper esp_vfs_fat_sdspi
+    // mount itself. 6144 overflowed on that mount path; 8192 gives the same headroom
+    // as viblog. (The boot-time mount in app_main normally makes this the early-out.)
+    xTaskCreate(monitor_task, "uartrx", 8192, NULL, 5, &s_task);
 }
 
 void uartrx_stop(void)
