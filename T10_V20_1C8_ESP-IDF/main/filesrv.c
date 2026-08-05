@@ -48,10 +48,12 @@ bool filesrv_running(void)      { return s_srv != NULL; }
 
 static void new_token(void)
 {
-    // DEV: a fixed token so tools/sync_test.sh doesn't chase a new one each boot.
-    // Swap back to a random per-session token (esp_fill_random) once the encrypted
-    // BLE WIFI_HANDOFF delivers it (task #25).
-    snprintf(s_token, sizeof(s_token), "t10devtoken");
+    // Fresh random per-session token (128-bit hex). Delivered to the phone over the
+    // encrypted BLE handoff; the HTTP API gates every request on it.
+    uint8_t r[16];
+    esp_fill_random(r, sizeof(r));
+    for (int i = 0; i < 16; i++) snprintf(s_token + i * 2, 3, "%02x", r[i]);
+    s_token[32] = '\0';
 }
 
 // Static SoftAP SSID for this device: "Octanis-XXXX" (last two MAC bytes).
@@ -126,14 +128,13 @@ static esp_err_t h_info(httpd_req_t *req)
         snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ipi.ip));
 
     const esp_app_desc_t *app = esp_app_get_description();
-    char body[320];
-    // NOTE: "token" here is a DEV convenience so tools/sync_test.sh can run without
-    // the serial dance. REMOVE it once the encrypted BLE WIFI_HANDOFF delivers the
-    // token (task #25) -- an unauthenticated endpoint must never leak it in production.
+    char body[288];
+    // Unauthenticated reachability probe -- never leaks the token (that comes only
+    // over the encrypted BLE handoff).
     snprintf(body, sizeof(body),
         "{\"fw\":\"%s\",\"provisioned\":%s,\"station_ip\":\"%s\","
-        "\"softap_ssid\":\"%s\",\"softap_capable\":true,\"token\":\"%s\"}",
-        app->version, provisioning_is_connected() ? "true" : "false", ip, ssid, s_token);
+        "\"softap_ssid\":\"%s\",\"softap_capable\":true}",
+        app->version, provisioning_is_connected() ? "true" : "false", ip, ssid);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, body);
@@ -259,56 +260,6 @@ static esp_err_t h_delete(httpd_req_t *req)
     return ESP_OK;
 }
 
-// GET /speedtest -- stream 4 MB of generated data (NO SD read, no auth). Isolates
-// pure Wi-Fi/TCP throughput from SD-read speed. curl http://192.168.4.1:8080/speedtest
-static esp_err_t h_speedtest(httpd_req_t *req)
-{
-    close_conn(req);
-    int fd = httpd_req_to_sockfd(req), one = 1;
-    if (fd >= 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-    memset(s_sendbuf, 'A', sizeof(s_sendbuf));
-    httpd_resp_set_type(req, "application/octet-stream");
-    for (int i = 0; i < 512; i++)                      // 512 * 8 KB = 4 MB
-        if (httpd_resp_send_chunk(req, (const char *)s_sendbuf, sizeof(s_sendbuf)) != ESP_OK) break;
-    httpd_resp_send_chunk(req, NULL, 0);
-    return ESP_OK;
-}
-
-// GET /sdread -- read file id 0 fully from SD and DISCARD it (no Wi-Fi send, no
-// auth). Isolates pure SD read speed. curl http://192.168.4.1:8080/sdread
-static esp_err_t h_sdread(httpd_req_t *req)
-{
-    close_conn(req);
-    char path[160];
-    if (!manifest_path_for_id(0, path, sizeof(path))) {
-        httpd_resp_sendstr(req, "no file id 0\n"); return ESP_OK;
-    }
-    // POSIX read() (no stdio buffering) vs stdio fread() -- compare both.
-    int64_t t0 = esp_timer_get_time();
-    int fd = open(path, O_RDONLY);
-    long total = 0; ssize_t r;
-    if (fd >= 0) {
-        while ((r = read(fd, s_sendbuf, sizeof(s_sendbuf))) > 0) total += (long)r;
-        close(fd);
-    }
-    int64_t ms1 = (esp_timer_get_time() - t0) / 1000;
-
-    int64_t t1 = esp_timer_get_time();
-    FILE *f = fopen(path, "rb");
-    long total2 = 0; size_t r2;
-    if (f) { while ((r2 = fread(s_sendbuf, 1, sizeof(s_sendbuf), f)) > 0) total2 += (long)r2; fclose(f); }
-    int64_t ms2 = (esp_timer_get_time() - t1) / 1000;
-
-    char body[192];
-    snprintf(body, sizeof(body),
-             "POSIX read %ld B in %lld ms = %ld KB/s\nstdio fread %ld B in %lld ms = %ld KB/s\n",
-             total,  (long long)ms1, (long)(ms1 > 0 ? total  / ms1 : 0),
-             total2, (long long)ms2, (long)(ms2 > 0 ? total2 / ms2 : 0));
-    ESP_LOGI(TAG, "%s", body);
-    httpd_resp_sendstr(req, body);
-    return ESP_OK;
-}
-
 // POST /session/stop -- invalidate the token; SoftAP teardown wired in later.
 static esp_err_t h_stop(httpd_req_t *req)
 {
@@ -354,8 +305,6 @@ bool filesrv_start(void)
         { .uri = "/file/*",       .method = HTTP_GET,    .handler = h_file },
         { .uri = "/file/*",       .method = HTTP_DELETE, .handler = h_delete },
         { .uri = "/session/stop", .method = HTTP_POST,   .handler = h_stop },
-        { .uri = "/speedtest",    .method = HTTP_GET,    .handler = h_speedtest },
-        { .uri = "/sdread",       .method = HTTP_GET,    .handler = h_sdread },
     };
     for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); i++)
         httpd_register_uri_handler(s_srv, &routes[i]);

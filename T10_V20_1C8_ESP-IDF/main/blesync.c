@@ -182,9 +182,15 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &s_svc_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]){
+            // Info READ is open (non-sensitive snapshot) so an unpaired phone can see
+            // the device. Control + WIFI_CREDS require an AUTHENTICATED (MITM-bonded)
+            // link -- writing them from an unpaired phone returns "insufficient
+            // authentication", which triggers passkey pairing. So "add device first".
             { .uuid = &s_info_uuid.u,   .access_cb = info_access,   .flags = BLE_GATT_CHR_F_READ },
-            { .uuid = &s_ctrl_uuid.u,   .access_cb = ctrl_access,   .flags = BLE_GATT_CHR_F_WRITE },
-            { .uuid = &s_creds_uuid.u,  .access_cb = creds_access,  .flags = BLE_GATT_CHR_F_WRITE },
+            { .uuid = &s_ctrl_uuid.u,   .access_cb = ctrl_access,
+              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN },
+            { .uuid = &s_creds_uuid.u,  .access_cb = creds_access,
+              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN },
             { .uuid = &s_status_uuid.u, .access_cb = status_access, .flags = BLE_GATT_CHR_F_NOTIFY,
               .val_handle = &s_status_val_handle },
             { 0 },

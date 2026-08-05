@@ -52,12 +52,14 @@ static void make_ssid(char *out, int cap)
     snprintf(out, cap, "Octanis-%02X%02X", mac[4], mac[5]);
 }
 
-// DEV: a fixed WPA2 passphrase so the test laptop remembers the SoftAP and we
-// don't retype it each boot. Swap back to a random per-session passphrase
-// (delivered over the encrypted BLE handoff) before release (task #25).
+// Fresh random 12-char WPA2 passphrase per session, delivered to the phone over the
+// encrypted BLE handoff (blesync). Never printed except to the debug serial.
 static void make_pass(char *out, int cap)
 {
-    snprintf(out, cap, "octanis123");
+    static const char cs[] = "abcdefghijkmnpqrstuvwxyz23456789";   // no easily-confused chars
+    int n = cap - 1 < 12 ? cap - 1 : 12;
+    for (int i = 0; i < n; i++) out[i] = cs[esp_random() % (sizeof(cs) - 1)];
+    out[n] = '\0';
 }
 
 bool apmode_start_session(void)
