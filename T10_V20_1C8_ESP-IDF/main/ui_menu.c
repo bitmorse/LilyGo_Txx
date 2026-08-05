@@ -21,6 +21,7 @@
 #include "esp_system.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
+#include "nvs_flash.h"
 
 // Main menu screen + its focusable widgets, so we can restore the encoder group
 // when returning from a sub-page.
@@ -636,11 +637,34 @@ static void mode_cb(lv_event_t *e)
         lv_label_set_text_fmt(s_mode_lbl, "Mode: %s", wlan ? "WLAN" : "BLE");
 }
 
+// Factory reset from the UI: same effect as holding ENTER+DOWN 5 s -- wipe ALL NVS
+// (BLE bonds + WiFi creds + settings) and reboot. Two-press confirm so a stray
+// encoder click can't wipe the device: first press arms + relabels; second press
+// (while armed) does it. Leaving the page discards the file, so the arm is transient.
+static lv_obj_t *s_factory_lbl;
+static bool      s_factory_armed;
+
+static void factory_reset_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_factory_armed) {
+        s_factory_armed = true;
+        if (s_factory_lbl) {
+            lv_label_set_text(s_factory_lbl, LV_SYMBOL_WARNING " Confirm reset?");
+            lv_obj_set_style_text_color(s_factory_lbl, lv_color_hex(0xE64A4A), 0);
+        }
+        return;
+    }
+    nvs_flash_erase();                   // BLE bonds + WiFi creds + settings
+    esp_restart();
+}
+
 static void settings_cb(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *page = page_shell("Settings");
     lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    s_factory_armed = false;             // fresh page -> never enter pre-armed
 
     lv_obj_t *b = lv_button_create(page);          // toggle button (press to flip)
     lv_obj_set_width(b, lv_pct(100));
@@ -658,6 +682,14 @@ static void settings_cb(lv_event_t *e)
     lv_obj_center(s_mode_lbl);
     lv_obj_add_event_cb(mb, mode_cb, LV_EVENT_CLICKED, NULL);
     page_focus_stop(mb);
+
+    lv_obj_t *fb = lv_button_create(page);         // factory reset (two-press confirm)
+    lv_obj_set_width(fb, lv_pct(100));
+    s_factory_lbl = lv_label_create(fb);
+    lv_label_set_text(s_factory_lbl, LV_SYMBOL_TRASH " Factory reset");
+    lv_obj_center(s_factory_lbl);
+    lv_obj_add_event_cb(fb, factory_reset_cb, LV_EVENT_CLICKED, NULL);
+    page_focus_stop(fb);
 
     lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
     lv_screen_load(page);
