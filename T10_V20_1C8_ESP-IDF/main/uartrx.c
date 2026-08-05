@@ -5,6 +5,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
@@ -27,6 +28,7 @@ static uartrx_sm_t             s_sm;
 static volatile bool           s_run;
 static TaskHandle_t            s_task;
 static bool                    s_uart_attached;    // monitor-task-local
+static QueueHandle_t           s_uart_q;           // UART driver event queue
 static volatile unsigned       s_bytes;
 
 // UI-visible mirrors of the SM (written by the monitor task, read by the LVGL task).
@@ -87,13 +89,16 @@ static bool attach_uart(void)
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    // RX-only: no TX ring, TX/RTS/CTS unmapped, RX routed onto GPIO21 via the matrix.
-    if (uart_driver_install(UART_PORT, RX_BUF, 0, 0, NULL, 0) != ESP_OK ||
+    // RX-only, with an EVENT QUEUE so we let the UART hardware tell real frames
+    // (UART_DATA) from the tool holding the line low while charging (UART_BREAK /
+    // framing errors). RX routed onto GPIO21 via the matrix.
+    if (uart_driver_install(UART_PORT, RX_BUF, 0, 20, &s_uart_q, 0) != ESP_OK ||
         uart_param_config(UART_PORT, &cfg) != ESP_OK ||
         uart_set_pin(UART_PORT, UART_PIN_NO_CHANGE, RX_GPIO,
                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
         ESP_LOGE(TAG, "UART attach failed");
         uart_driver_delete(UART_PORT);
+        s_uart_q = NULL;
         s_uart_attached = false;
         return false;
     }
@@ -104,7 +109,8 @@ static bool attach_uart(void)
 
 static void detach_uart(void)
 {
-    uart_driver_delete(UART_PORT);
+    uart_driver_delete(UART_PORT);     // also frees the event queue
+    s_uart_q = NULL;
     s_uart_attached = false;
     set_rest_pin();                    // back to a plain input for line polling
 }
@@ -114,39 +120,46 @@ static void monitor_task(void *arg)
     (void)arg;
     set_rest_pin();                    // WAIT polls the line as a plain input
     int64_t low_streak = 0;
-    bool    prev_low = false;
     uartrx_state_t prev = s_sm.state;
     uint8_t buf[256];
 
     while (s_run) {
         int64_t now = now_ms();
 
-        // Debounced line: LOW held >= DEBOUNCE_MS means the tool is holding the line
-        // low (charging). A 9600 UART frame never holds LOW that long, so a released
-        // (HIGH-idling) line clears this immediately.
+        // Debounced line for tool PRESENCE only (WAIT->CHARGING on insertion, and the
+        // removal grace). LOW held >= DEBOUNCE_MS = tool holding the line low; a 9600
+        // frame can't hold LOW that long, so a released line clears this immediately.
         int lvl = gpio_get_level(RX_GPIO);
         low_streak = (lvl == 0) ? low_streak + POLL_MS : 0;
         bool line_low = low_streak >= DEBOUNCE_MS;
 
-        // Real UART data only counts while the line is not steady-LOW; break noise
-        // during charging is flushed and ignored.
-        bool uart_byte = false;
-        if (s_uart_attached) {
-            if (line_low) {
-                uart_flush_input(UART_PORT);
-            } else {
-                if (prev_low) uart_flush_input(UART_PORT);   // release edge: drop straddling byte
-                int n = uart_read_bytes(UART_PORT, buf, sizeof(buf), 0);
-                if (n > 0) {
-                    uart_byte = true;
-                    s_bytes += (unsigned)n;
-                    taskENTER_CRITICAL(&s_ring_mux);
-                    uartrx_ring_push(&s_ring, buf, n);
-                    taskEXIT_CRITICAL(&s_ring_mux);
+        // DATA detection is done by the UART hardware, NOT the GPIO level: drain the
+        // event queue and treat only UART_DATA (validly-framed bytes) as real data.
+        // The tool holding the line low while charging shows up as UART_BREAK /
+        // framing errors, which we flush and ignore -- so LOW-heavy real traffic is
+        // no longer mistaken for "still charging".
+        bool uart_byte = false, saw_break = false;
+        if (s_uart_attached && s_uart_q) {
+            uart_event_t ev;
+            while (xQueueReceive(s_uart_q, &ev, 0) == pdTRUE) {
+                if (ev.type == UART_DATA) {
+                    size_t want = ev.size > sizeof(buf) ? sizeof(buf) : ev.size;
+                    int n = uart_read_bytes(UART_PORT, buf, want, 0);
+                    if (n > 0) {
+                        uart_byte = true;
+                        s_bytes += (unsigned)n;
+                        taskENTER_CRITICAL(&s_ring_mux);
+                        uartrx_ring_push(&s_ring, buf, n);
+                        taskEXIT_CRITICAL(&s_ring_mux);
+                    }
+                } else {
+                    saw_break = true;              // break / framing / overflow (charging low)
                 }
             }
+            // Clear break junk only if the round produced no real data -- otherwise a
+            // break event ordered before the data event would wipe the just-read frames.
+            if (saw_break && !uart_byte) uart_flush_input(UART_PORT);
         }
-        prev_low = line_low;
 
         uartrx_in_t in = { .line_low = line_low, .uart_byte = uart_byte, .now_ms = now };
         uartrx_act_t act = uartrx_sm_step(&s_sm, in);

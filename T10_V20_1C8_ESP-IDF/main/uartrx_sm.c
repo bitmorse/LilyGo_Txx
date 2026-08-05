@@ -9,6 +9,7 @@ static void enter(uartrx_sm_t *sm, uartrx_state_t st, int64_t now)
 void uartrx_sm_init(uartrx_sm_t *sm, int64_t now_ms)
 {
     sm->last_data_ms = now_ms;
+    sm->low_seen_ms  = now_ms;
     enter(sm, UARTRX_REST, now_ms);
 }
 
@@ -31,6 +32,7 @@ uartrx_act_t uartrx_sm_step(uartrx_sm_t *sm, uartrx_in_t in)
     switch (sm->state) {
     case UARTRX_WAIT:
         if (in.line_low) {                       // tool inserted, holding the line low
+            sm->low_seen_ms = in.now_ms;
             enter(sm, UARTRX_CHARGING, in.now_ms);
             return UARTRX_ACT_ATTACH_UART;
         }
@@ -41,6 +43,12 @@ uartrx_act_t uartrx_sm_step(uartrx_sm_t *sm, uartrx_in_t in)
             sm->last_data_ms = in.now_ms;
             enter(sm, UARTRX_DATA, in.now_ms);
             return UARTRX_ACT_NONE;
+        }
+        if (in.line_low) {
+            sm->low_seen_ms = in.now_ms;         // still holding low -> keep charging
+        } else if (in.now_ms - sm->low_seen_ms >= UARTRX_CHARGE_RELEASE_MS) {
+            enter(sm, UARTRX_WAIT, in.now_ms);   // released with no data -> tool removed
+            return UARTRX_ACT_DETACH_UART;
         }
         if (in.now_ms - sm->since_ms >= UARTRX_CHARGE_TIMEOUT_MS) {
             enter(sm, UARTRX_FAULT, in.now_ms);  // battery never charged / tool broken

@@ -29,12 +29,15 @@ typedef enum {
 } uartrx_act_t;
 
 #define UARTRX_CHARGE_TIMEOUT_MS 600000   // 10 min max charge wait before FAULT
+#define UARTRX_CHARGE_RELEASE_MS   2000   // line released (HIGH) this long in CHARGING
+                                          // with no data -> tool removed -> WAIT (tunable)
 #define UARTRX_DATA_IDLE_MS        5000   // no data this long in DATA -> re-arm (tunable)
 
 typedef struct {
     uartrx_state_t state;
     int64_t        since_ms;       // when the current state was entered
     int64_t        last_data_ms;   // last real UART byte (DATA idle re-arm)
+    int64_t        low_seen_ms;    // last time the line was LOW in CHARGING (removal grace)
 } uartrx_sm_t;
 
 typedef struct {

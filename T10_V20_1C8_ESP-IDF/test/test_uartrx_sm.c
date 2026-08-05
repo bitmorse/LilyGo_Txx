@@ -93,6 +93,44 @@ static void test_charging_timeout_boundary(void)
     CHECK_EQ(a, UARTRX_ACT_DETACH_UART);
 }
 
+static void test_charging_release_rearms_on_removal(void)
+{
+    uartrx_sm_t sm;
+    to_charging(&sm, 10);            // entered CHARGING at t=10 (line low)
+    // Tool removed: line goes HIGH, no data. Just under the grace: still CHARGING.
+    uartrx_act_t a = uartrx_sm_step(&sm, IN(false, false, 10 + UARTRX_CHARGE_RELEASE_MS - 1));
+    CHECK_EQ(sm.state, UARTRX_CHARGING);
+    CHECK_EQ(a, UARTRX_ACT_NONE);
+    // Grace elapsed with no data -> tool was removed -> re-arm to WAIT + detach.
+    a = uartrx_sm_step(&sm, IN(false, false, 10 + UARTRX_CHARGE_RELEASE_MS));
+    CHECK_EQ(sm.state, UARTRX_WAIT);
+    CHECK_EQ(a, UARTRX_ACT_DETACH_UART);
+}
+
+static void test_charging_release_then_data_is_data(void)
+{
+    uartrx_sm_t sm;
+    to_charging(&sm, 10);
+    // Legit UART start: line released HIGH then a real byte within the grace -> DATA,
+    // never a spurious removal.
+    uartrx_act_t a = uartrx_sm_step(&sm, IN(false, true, 10 + UARTRX_CHARGE_RELEASE_MS / 2));
+    CHECK_EQ(sm.state, UARTRX_DATA);
+    CHECK_EQ(a, UARTRX_ACT_NONE);
+}
+
+static void test_charging_brief_release_resets_grace(void)
+{
+    uartrx_sm_t sm;
+    to_charging(&sm, 10);
+    // Line blips HIGH briefly then LOW again (tool re-seating): the removal grace
+    // restarts from the last LOW, so it does NOT re-arm.
+    uartrx_sm_step(&sm, IN(false, false, 10 + 500));                 // released 500 ms
+    uartrx_sm_step(&sm, IN(true,  false, 10 + 600));                 // low again -> resets
+    uartrx_act_t a = uartrx_sm_step(&sm, IN(false, false, 10 + 600 + UARTRX_CHARGE_RELEASE_MS - 1));
+    CHECK_EQ(sm.state, UARTRX_CHARGING);
+    CHECK_EQ(a, UARTRX_ACT_NONE);
+}
+
 static void test_data_byte_keeps_alive(void)
 {
     uartrx_sm_t sm;
@@ -189,6 +227,9 @@ int main(void)
     RUN(test_charging_byte_to_data);
     RUN(test_charging_no_byte_stays);
     RUN(test_charging_timeout_boundary);
+    RUN(test_charging_release_rearms_on_removal);
+    RUN(test_charging_release_then_data_is_data);
+    RUN(test_charging_brief_release_resets_grace);
     RUN(test_data_byte_keeps_alive);
     RUN(test_data_idle_rearms);
     RUN(test_fault_rearms_on_removal);
