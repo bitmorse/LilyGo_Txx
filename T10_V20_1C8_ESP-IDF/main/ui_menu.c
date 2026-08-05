@@ -680,15 +680,38 @@ static void uart_update(lv_timer_t *t)
     (void)t;
     if (!s_uart_label) return;
     uartrx_state_t st = uartrx_state();
-    char hex[3 * 8 + 1];
-    uartrx_last_hex(hex, sizeof(hex));
-    lv_label_set_text_fmt(s_uart_label,
-        "State: %s\nGPIO21 @ 9600 8N1\n\nbytes: %u\nlast: %s",
-        uartrx_state_str(st), uartrx_bytes(), hex[0] ? hex : "-");
+    switch (st) {
+    case UARTRX_WAIT:
+        lv_label_set_text(s_uart_label,
+            "WAIT\n\nWaiting for tool…\nGPIO21 HIGH (no tool)");
+        break;
+    case UARTRX_CHARGING: {
+        long s = (long)(uartrx_state_elapsed_ms() / 1000);
+        lv_label_set_text_fmt(s_uart_label,
+            "CHARGING\n\nTool inserted (LOW)\ncharging %lds / 600s", s);
+        break;
+    }
+    case UARTRX_DATA: {
+        char hex[3 * 8 + 1];
+        uartrx_last_hex(hex, sizeof(hex));
+        lv_label_set_text_fmt(s_uart_label,
+            "DATA\n\nbytes: %u\nlast: %s", uartrx_bytes(), hex[0] ? hex : "-");
+        break;
+    }
+    case UARTRX_FAULT:
+        lv_label_set_text(s_uart_label,
+            "FAULT\n\nNo UART after 10 min\ncheck / replace tool");
+        break;
+    case UARTRX_REST:
+    default:
+        lv_label_set_text(s_uart_label,
+            "REST\n\nGPIO21 @ 9600 8N1\nPress Start to arm");
+        break;
+    }
     if (s_uart_btn_label)
         lv_label_set_text(s_uart_btn_label,
-            st == UARTRX_DATA ? LV_SYMBOL_STOP " Stop (-> REST)"
-                              : LV_SYMBOL_PLAY " Start (-> DATA)");
+            st == UARTRX_REST ? LV_SYMBOL_PLAY " Start"
+                              : LV_SYMBOL_STOP " Stop");
 }
 
 static void uart_toggle_cb(lv_event_t *e)

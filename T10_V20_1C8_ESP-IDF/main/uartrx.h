@@ -1,31 +1,34 @@
-// UART RX on GPIO21 (9600 8N1, receive-only) with an explicit two-state machine.
+// Tool-dock UART RX on GPIO21 (9600 8N1, receive-only). Hardware glue around the
+// pure state machine in uartrx_sm.h -- a monitor task polls the debounced line level
+// and (once a tool is detected) the UART, driving the machine and attaching/detaching
+// UART1 as it directs.
 //
-//   REST — GPIO21 is a plain GPIO input with NO pull (internal pulls disabled) and
-//          the UART peripheral is detached. Nothing reads or drives the line. This
-//          is the power-on default and the state we return to when receiving stops.
-//   DATA — UART1 is installed and its RX signal is routed onto GPIO21 via the GPIO
-//          matrix; a reader task drains incoming bytes. Entered on demand (a UI
-//          button), left back to REST on demand.
+//   REST     — GPIO21 input, no pull, no UART. Power-on default.
+//   WAIT     — armed; line HIGH = no tool inserted.
+//   CHARGING — line held LOW = tool inserted, batteries charging; awaiting UART.
+//   DATA     — UART data flowing; bytes counted + last bytes shown.
+//   FAULT    — 10 min charging with no UART = tool broken.
 //
-// GPIO21 is free on this board (see docs/HARDWARE.md); it isn't a dedicated UART pin,
-// so the RX signal is mapped through the GPIO matrix. UART0 (USB console) is left
-// untouched -- this uses UART1.
+// GPIO21 is free on this board (docs/HARDWARE.md); not a dedicated UART pin, so RX is
+// mapped through the GPIO matrix onto UART1 (UART0 is the USB console, left untouched).
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
+#include "uartrx_sm.h"          // uartrx_state_t, uartrx_state_str()
 
-typedef enum { UARTRX_REST, UARTRX_DATA } uartrx_state_t;
-
-// Put GPIO21 into the REST configuration (input, no pull). Call once at boot.
+// Put GPIO21 into REST (input, no pull). Call once at boot.
 void uartrx_init(void);
 
-void uartrx_start(void);          // REST -> DATA: attach UART1 RX to GPIO21, receive
-void uartrx_stop(void);           // DATA -> REST: detach UART, GPIO21 back to input/no-pull
+void uartrx_start(void);        // REST -> WAIT: arm; begin watching for a docked tool
+void uartrx_stop(void);         // any -> REST: disarm, detach UART, GPIO21 input/no-pull
 
 uartrx_state_t uartrx_state(void);
-const char *uartrx_state_str(uartrx_state_t s);
 
-// Total bytes received since the last uartrx_start().
+// Milliseconds spent in the current state (for the CHARGING countdown display).
+int64_t uartrx_state_elapsed_ms(void);
+
+// Total bytes received since entering DATA.
 unsigned uartrx_bytes(void);
 
 // Hex of the most recently received bytes (up to a few), for the UI. Writes a
