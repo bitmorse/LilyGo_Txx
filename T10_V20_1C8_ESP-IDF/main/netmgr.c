@@ -5,6 +5,7 @@
 #include "filesrv.h"
 #include "settings.h"
 #include "viblog.h"
+#include "uartrx.h"                // uartrx_is_recording() -- SD single-writer guard
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -157,17 +158,25 @@ static void enter_softap(void)
     s_softap_from_sync = (s_state == NET_SYNC_IDLE);
     if (!s_softap_from_sync) provisioning_sta_disconnect();   // drop STA first
 
-    if (!apmode_start_session() || !filesrv_start()) {
+    if (!apmode_start_session()) {             // SoftAP up (BLE still up; no httpd yet)
         ESP_LOGE(TAG, "softap start failed");
         apmode_stop();
         if (s_softap_from_sync) enter_sync(); else enter_sta();
         return;
     }
-    // blesync is up in both bases now: hand the phone the creds+token over BLE, then
-    // free BLE for the transfer (BLE + SoftAP together starve the heap).
+    // Order matters for heap: hand the phone the creds+token over BLE, tear BLE all
+    // the way down (frees ~48 KB), and ONLY THEN start the heap-heavy HTTP server.
+    // Starting httpd while BLE is still up leaves ~0 free -> flaky, no handoff.
+    filesrv_new_token();                        // token for the handoff (no server yet)
     blesync_notify_handoff();
     vTaskDelay(pdMS_TO_TICKS(1000));            // let the notify reach the phone
     blesync_stop();
+    if (!filesrv_start()) {                     // now with BLE's heap freed
+        ESP_LOGE(TAG, "filesrv start failed (post-BLE-stop)");
+        apmode_stop();
+        if (s_softap_from_sync) enter_sync(); else enter_sta();
+        return;
+    }
     s_state = NET_SOFTAP;
     ESP_LOGI(TAG, "-> softap (base=%s)", s_softap_from_sync ? "sync" : "sta");
 }
@@ -185,12 +194,18 @@ static void exit_softap(void)
 // transfer (Stage 0: BLE + httpd don't fit), and restored after.
 static void enter_wlan_serve(void)
 {
-    if (!filesrv_start()) { ESP_LOGE(TAG, "wlan-serve: filesrv failed"); return; }
     char ip[16];
     get_sta_ip(ip, sizeof(ip));
+    // Same heap ordering as enter_softap(): hand off over BLE, free BLE, THEN httpd.
+    filesrv_new_token();                        // token for the handoff (no server yet)
     blesync_notify_wlan_handoff(ip, 8080, filesrv_token());
     vTaskDelay(pdMS_TO_TICKS(1000));            // let the notify reach the phone
-    blesync_stop();
+    blesync_stop();                             // free BLE heap before starting httpd
+    if (!filesrv_start()) {                     // now with BLE's heap freed
+        ESP_LOGE(TAG, "wlan-serve: filesrv failed (post-BLE-stop)");
+        enter_sta();                            // STA base: restart blesync + reconnect
+        return;
+    }
     s_state = NET_WLAN_SERVE;
     ESP_LOGI(TAG, "-> wlan-serve (%s:8080)", ip);
 }
@@ -207,9 +222,11 @@ static void handle(msg_t m)
 {
     switch (m) {
     case MSG_SOFTAP_START:
-        // One SD writer at a time: don't raise a file server while viblog records.
-        if (viblog_is_running()) {
-            ESP_LOGW(TAG, "SD busy (vibration log) -> refusing sync");
+        // One SD writer at a time: don't raise a file server while the SD is being
+        // written (vibration log OR the UART-RX MCAP recording). Two writers + the
+        // file server on one no-PSRAM card corrupts data and starves the heap.
+        if (viblog_is_running() || uartrx_is_recording()) {
+            ESP_LOGW(TAG, "SD busy (recording) -> refusing sync");
             break;
         }
         if (s_state == NET_STA_CONNECTED) {

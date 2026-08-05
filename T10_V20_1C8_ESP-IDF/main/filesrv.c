@@ -44,6 +44,14 @@ int64_t filesrv_idle_ms(void)
 const char *filesrv_token(void) { return s_token; }
 bool filesrv_running(void)      { return s_srv != NULL; }
 
+static void new_token(void);
+
+// Issue a fresh session token WITHOUT starting the server. netmgr calls this so it
+// can put the token in the BLE handoff, tear BLE down, and only THEN start the heavy
+// HTTP server (BLE + httpd don't fit in heap together). filesrv_start() reuses this
+// token instead of minting a second one that would invalidate the handed-off value.
+const char *filesrv_new_token(void) { new_token(); touch(); return s_token; }
+
 // --- helpers ----------------------------------------------------------------
 
 static void new_token(void)
@@ -288,9 +296,9 @@ static void precache_task(void *arg)
 
 bool filesrv_start(void)
 {
-    new_token();                               // always (re)issue a valid token,
-    touch();                                   // even if the server is already up
-    if (s_srv) return true;                     // (e.g. a re-triggered START_SOFTAP)
+    if (s_token[0] == '\0') new_token();        // reuse the token filesrv_new_token()
+    touch();                                    // already minted for the BLE handoff;
+    if (s_srv) return true;                     // only mint one if none was issued yet
     manifest_init();                            // create the scan lock (single-threaded here)
     if (!sd_mount()) { ESP_LOGE(TAG, "no SD card"); return false; }
 

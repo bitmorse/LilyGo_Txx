@@ -78,6 +78,7 @@ unsigned       uartrx_bytes(void)         { return s_bytes; }
 int64_t        uartrx_state_elapsed_ms(void) { return now_ms() - s_since_ms; }
 uint64_t       uartrx_rec_bytes(void)     { return s_rec_bytes; }
 const char    *uartrx_rec_path(void)      { return s_fp ? s_rec_path : ""; }
+bool           uartrx_is_recording(void)  { return s_fp != NULL; }   // actively writing SD
 
 int uartrx_last_hex(char *out, int cap)
 {

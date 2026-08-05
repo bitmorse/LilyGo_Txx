@@ -16,5 +16,10 @@ bool filesrv_running(void);
 // Current bearer token (32 hex chars), for the BLE WIFI_HANDOFF payload.
 const char *filesrv_token(void);
 
+// Mint a fresh session token without starting the server, and return it. Lets the
+// caller hand the token to the phone over BLE and tear BLE down BEFORE starting the
+// (heap-heavy) HTTP server; filesrv_start() then reuses this token.
+const char *filesrv_new_token(void);
+
 #include <stdint.h>
 int64_t filesrv_idle_ms(void);   // ms since the last HTTP request (0 if stopped)

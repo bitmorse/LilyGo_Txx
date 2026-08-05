@@ -70,9 +70,10 @@ bool apmode_start_session(void)
                                                 // (a re-triggered START would
                                                 // otherwise drop the client mid-download)
 
-    // NOTE: BLE must already be stopped by netmgr before this in the sync case --
-    // SoftAP + active BLE starve the heap. netmgr sequences that; apmode just owns
-    // the AP netif + Wi-Fi mode.
+    // NOTE: netmgr brings the AP up with BLE still active (to send the handoff), then
+    // tears BLE down BEFORE starting the HTTP server -- SoftAP + BLE + httpd is what
+    // starves the heap, SoftAP + BLE alone (no server yet) is fine. apmode just owns
+    // the AP netif + Wi-Fi mode; netmgr sequences the BLE teardown.
     char *ssid = s_ssid, *pass = s_pass;
 
     if (s_ap_netif == NULL) {

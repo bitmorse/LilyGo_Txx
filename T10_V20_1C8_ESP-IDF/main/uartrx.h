@@ -39,3 +39,8 @@ int uartrx_last_hex(char *out, int cap);
 // /state, /meta). "" if no SD card / not recording. Bytes written so far.
 const char *uartrx_rec_path(void);
 uint64_t    uartrx_rec_bytes(void);
+
+// True while the MCAP recording file is open (actively writing the SD card). The
+// connectivity manager refuses a file-sync session while this is true -- one SD
+// writer at a time (same rule as viblog_is_running()).
+bool uartrx_is_recording(void);
