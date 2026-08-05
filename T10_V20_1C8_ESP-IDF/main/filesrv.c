@@ -141,21 +141,26 @@ static esp_err_t h_info(httpd_req_t *req)
     return ESP_OK;
 }
 
-// GET /manifest -- token-protected file list.
+// Sink for manifest_stream_json: forward each chunk as an HTTP chunked-transfer
+// piece. Streaming keeps the (potentially large) file list off DRAM entirely.
+static int manifest_chunk_sink(void *ctx, const char *data, int len)
+{
+    return httpd_resp_send_chunk((httpd_req_t *)ctx, data, len) == ESP_OK ? 0 : -1;
+}
+
+// GET /manifest -- token-protected file list (chunked; no size ceiling).
 static esp_err_t h_manifest(httpd_req_t *req)
 {
     close_conn(req);
     if (!auth_ok(req)) return deny(req);
-    static char json[10240];                   // sized to hold all MAX_FILES entries
     int64_t t0 = esp_timer_get_time();
-    manifest_precache_hold(true);              // full SD bus for the scan
-    int n = manifest_build_json(json, sizeof(json));
-    manifest_precache_hold(false);
-    ESP_LOGI(TAG, "manifest: %d bytes in %lld ms", n, (esp_timer_get_time() - t0) / 1000);
-    if (n < 0) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "manifest"); return ESP_FAIL; }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json, n);
-    return ESP_OK;
+    manifest_precache_hold(true);              // full SD bus for the scan
+    int rc = manifest_stream_json(manifest_chunk_sink, req);
+    manifest_precache_hold(false);
+    httpd_resp_send_chunk(req, NULL, 0);       // terminate the chunked response
+    ESP_LOGI(TAG, "manifest streamed in %lld ms (rc=%d)", (esp_timer_get_time() - t0) / 1000, rc);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
 // GET /file/<id> -- token-protected, Range-resumable, ETag = sha256.
@@ -327,9 +332,10 @@ bool filesrv_start(void)
 
     // Precompute sha256 sidecars in the background so the manifest never blocks
     // on hashing (reading multi-MB files off the SPI SD is slow).
-    // 12288: manifest_precache() holds a ~2.5 KB names[] array on-stack and calls
-    // compute_sha256() (2 KB read buffer + mbedtls + FATFS) -- 8192 overflowed.
-    xTaskCreate(precache_task, "sha_cache", 12288, NULL, 3, NULL);
+    // 16384: manifest_precache() holds a names[MAX_FILES][NAME_MAX_] array on-stack
+    // (96*64 = 6 KB at MAX_FILES=96) and calls compute_sha256() (2 KB read buffer +
+    // mbedtls + FATFS). Grows with MAX_FILES -- 8192 overflowed even at 40 files.
+    xTaskCreate(precache_task, "sha_cache", 16384, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "file server on :%d  (token=%s)  http://t10.local:%d/info",
              PORT, s_token, PORT);

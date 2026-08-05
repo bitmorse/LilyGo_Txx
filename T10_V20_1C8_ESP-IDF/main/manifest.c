@@ -1,4 +1,5 @@
 #include "manifest.h"
+#include "manifest_filter.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -20,9 +21,11 @@
 static const char *TAG = "manifest";
 
 #define MOUNT     "/sdcard"
-#define MAX_FILES 40      // bounds the static scan buffer (DRAM is tight: no PSRAM,
+#define MAX_FILES 96      // bounds the static scan buffer (DRAM is tight: no PSRAM,
                           // and WiFi+BLE+LVGL already claim most of it). The manifest
-                          // JSON buffer in filesrv.c is sized to hold all MAX_FILES.
+                          // is streamed (no per-request buffer), so this is the only
+                          // ceiling; the precache task stack in filesrv.c holds a
+                          // names[MAX_FILES][NAME_MAX_] array -- grow it in step.
 #define NAME_MAX_ 64
 
 typedef struct {
@@ -57,13 +60,6 @@ static void unlock(void) { xSemaphoreGive(s_lock); }
 
 // --- helpers ----------------------------------------------------------------
 
-static bool is_sidecar_or_hidden(const char *n)
-{
-    if (n[0] == '.') return true;                       // hidden / dotfiles
-    size_t len = strlen(n);
-    return len >= 5 && strcmp(n + len - 5, ".s256") == 0;
-}
-
 static const char *mime_for(const char *name)
 {
     const char *dot = strrchr(name, '.');
@@ -91,7 +87,7 @@ static int scan(entry_t *list, int max)
     struct dirent *de;
     while (n < max && (de = readdir(d)) != NULL) {
         if (de->d_type == DT_DIR) continue;
-        if (is_sidecar_or_hidden(de->d_name)) continue;
+        if (!manifest_include_name(de->d_name)) continue;   // .mcap recordings only
         size_t nl = strlen(de->d_name);
         if (nl == 0 || nl >= NAME_MAX_) continue;       // bounds the copies below
 
@@ -105,6 +101,8 @@ static int scan(entry_t *list, int max)
         list[n].mtime = st.st_mtime;
         n++;
     }
+    if (n == max)                                       // don't cap silently
+        ESP_LOGW(TAG, "manifest capped at %d files; extra .mcap files hidden", max);
     closedir(d);
     qsort(list, n, sizeof(entry_t), cmp_name);          // stable id ordering
     return n;
@@ -183,20 +181,41 @@ static bool sha256_cached(const char *name, char *hex)
 
 // --- public -----------------------------------------------------------------
 
-int manifest_build_json(char *out, int cap)
+// Append `src` (len m) to the fixed `buf`, flushing to `sink` first if it wouldn't
+// fit. Returns 0, or -1 if the sink aborted. `*plen` tracks bytes buffered.
+static int emit(manifest_sink_fn sink, void *ctx, char *buf, int cap,
+                int *plen, const char *src, int m)
 {
-    assert(out && cap > 64);
+    assert(sink && buf && plen && m >= 0 && m <= cap);
+    if (*plen + m > cap) {                        // flush what we have, then append
+        if (sink(ctx, buf, *plen) != 0) return -1;
+        *plen = 0;
+    }
+    memcpy(buf + *plen, src, m);
+    *plen += m;
+    return 0;
+}
+
+int manifest_stream_json(manifest_sink_fn sink, void *ctx)
+{
+    assert(sink);
     unsigned long long freeb = 0;
     uint64_t total = 0, avail = 0;
     if (esp_vfs_fat_info(MOUNT, &total, &avail) == ESP_OK)
         freeb = avail;
 
+    char buf[1024];                               // chunk accumulator (stack)
+    int len = 0, rc = 0;
+
     lock();
     int n = scan(s_files, MAX_FILES);
-    int off = snprintf(out, cap, "{\"v\":1,\"free_bytes\":%llu,\"files\":[", freeb);
-    if (off < 0 || off >= cap) { unlock(); return -1; }         // header didn't fit
 
-    for (int i = 0; i < n; i++) {
+    char hdr[64];
+    int h = snprintf(hdr, sizeof(hdr), "{\"v\":1,\"free_bytes\":%llu,\"files\":[", freeb);
+    if (h < 0 || h >= (int)sizeof(hdr)) { unlock(); return -1; }
+    rc = emit(sink, ctx, buf, sizeof(buf), &len, hdr, h);
+
+    for (int i = 0; i < n && rc == 0; i++) {
         char hex[65] = {0};
         bool have_hash = sha256_read_sidecar(s_files[i].name, hex);  // fast; no compute
 
@@ -205,10 +224,7 @@ int manifest_build_json(char *out, int cap)
         gmtime_r(&s_files[i].mtime, &tmv);
         strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tmv);
 
-        // One entry needs at most ~200 bytes; stop cleanly (valid JSON) rather than
-        // overflow. A truncated manifest beats a 500 -- the client still syncs what
-        // it sees and re-lists later.
-        char ent[288];
+        char ent[288];                            // one entry needs at most ~200 B
         int m = snprintf(ent, sizeof(ent),
             "%s{\"id\":%d,\"name\":\"%s\",\"mime\":\"%s\",\"bytes\":%ld,"
             "\"created_at\":\"%s\"%s%s%s}",
@@ -216,16 +232,14 @@ int manifest_build_json(char *out, int cap)
             s_files[i].size, iso,
             have_hash ? ",\"sha256\":\"" : "", have_hash ? hex : "",
             have_hash ? "\"" : "");
-        if (m < 0 || off + m >= cap - 2) break;                // leave room for "]}"
-        memcpy(out + off, ent, m);
-        off += m;
+        if (m < 0 || m >= (int)sizeof(ent)) continue;   // never expected; skip entry
+        rc = emit(sink, ctx, buf, sizeof(buf), &len, ent, m);
     }
-    unlock();
 
-    out[off++] = ']';
-    out[off++] = '}';
-    out[off]   = '\0';
-    return off;
+    if (rc == 0) rc = emit(sink, ctx, buf, sizeof(buf), &len, "]}", 2);
+    if (rc == 0 && len > 0 && sink(ctx, buf, len) != 0) rc = -1;   // final flush
+    unlock();
+    return rc;
 }
 
 bool manifest_path_for_id(int id, char *path, int cap)
@@ -258,7 +272,7 @@ void manifest_precache(void)
     // Snapshot the names under the lock, then hash OUTSIDE it (hashing is slow and
     // must not hold the scan lock, nor block a client download -- see the hold flag).
     // On the precache task's own stack (bumped to 8 KB), not BSS -- DRAM is scarce.
-    char names[MAX_FILES][NAME_MAX_];          // MAX_FILES*NAME_MAX_ = 2560 B on stack
+    char names[MAX_FILES][NAME_MAX_];          // MAX_FILES*NAME_MAX_ = 6144 B on stack
     lock();
     int n = scan(s_files, MAX_FILES);
     for (int i = 0; i < n; i++) memcpy(names[i], s_files[i].name, NAME_MAX_);

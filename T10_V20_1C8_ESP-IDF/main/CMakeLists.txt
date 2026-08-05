@@ -19,6 +19,7 @@ idf_component_register(
         "accel_encode.c"
         "viblog.c"
         "manifest.c"
+        "manifest_filter.c"
         "filesrv.c"
         "apmode.c"
         "uartrx.c"

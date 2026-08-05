@@ -13,11 +13,14 @@ void manifest_init(void);
 // during a transfer so a client download gets the full SD bus (no hashing races).
 void manifest_precache_hold(bool hold);
 
-// Build the manifest JSON into `out` (capacity `cap`). Returns the length written,
-// or -1 only if `out` is too small for even the header. sha256 fields come from
-// cached sidecars (never computed here); a file not yet hashed omits its sha256.
-// Overflow is handled gracefully: the file list is truncated to valid JSON.
-int manifest_build_json(char *out, int cap);
+// Stream the manifest JSON through `sink` (called with successive chunks; return 0
+// to continue, non-zero to abort). Streaming instead of one big buffer keeps the
+// whole file list off DRAM (no per-request size ceiling, no 20 KB static buffer).
+// sha256 fields come from cached sidecars (never computed here); a file not yet
+// hashed omits its sha256. Returns 0 on success, -1 if `sink` aborted (partial
+// output already emitted -- the socket is closing anyway).
+typedef int (*manifest_sink_fn)(void *ctx, const char *data, int len);
+int manifest_stream_json(manifest_sink_fn sink, void *ctx);
 
 // Map a manifest id (stable within a directory scan) to its /sdcard path.
 bool manifest_path_for_id(int id, char *path, int cap);
