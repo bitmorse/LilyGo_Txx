@@ -40,9 +40,11 @@ static const ble_uuid128_t s_status_uuid = SYNC_UUID(0x04);
 static const ble_uuid128_t s_creds_uuid  = SYNC_UUID(0x05);   // WIFI_CREDS (WRITE)
 
 // --- control opcodes ----------------------------------------------------------
-#define OP_START_SOFTAP 0x11
-#define OP_STOP_WIFI    0x12
-#define OP_UNPAIR       0x16
+#define OP_START_SOFTAP   0x11
+#define OP_STOP_WIFI      0x12
+#define OP_SET_MODE_WLAN  0x13
+#define OP_SET_MODE_BLE   0x14
+#define OP_UNPAIR         0x16
 
 // --- state --------------------------------------------------------------------
 static bool     s_active;
@@ -93,6 +95,21 @@ void blesync_notify_handoff(void)
     ESP_LOGI(TAG, "handoff sent: %s", json);
 }
 
+// WLAN-path handoff: the phone stays on its home network and pulls files from the
+// device's STA IP -- no SoftAP join. netmgr calls this before tearing BLE down to
+// serve over the LAN.
+void blesync_notify_wlan_handoff(const char *ip, int port, const char *token)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    char json[160];
+    int n = snprintf(json, sizeof(json),
+        "{\"mode\":\"wlan\",\"ip\":\"%s\",\"port\":%d,\"token\":\"%s\"}",
+        ip, port, token);
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(json, n);
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_status_val_handle, om);
+    ESP_LOGI(TAG, "wlan handoff: %s", json);
+}
+
 // The control characteristic just forwards intent to netmgr, which owns the WiFi
 // mode and BLE lifecycle (bring SoftAP up, hand off, free BLE / restore).
 static int ctrl_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -103,9 +120,11 @@ static int ctrl_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *
     if (len >= 1) os_mbuf_copydata(ctxt->om, 0, 1, &op);
     ESP_LOGI(TAG, "control opcode 0x%02X", op);
     switch (op) {
-    case OP_START_SOFTAP: netmgr_request_softap(); break;
-    case OP_STOP_WIFI:    netmgr_request_stop_softap(); break;
-    case OP_UNPAIR:       ble_store_clear(); ESP_LOGI(TAG, "unpaired (bonds cleared)"); break;
+    case OP_START_SOFTAP:  netmgr_request_softap(); break;
+    case OP_STOP_WIFI:     netmgr_request_stop_softap(); break;
+    case OP_SET_MODE_WLAN: netmgr_request_set_mode(true);  break;
+    case OP_SET_MODE_BLE:  netmgr_request_set_mode(false); break;
+    case OP_UNPAIR:        ble_store_clear(); ESP_LOGI(TAG, "unpaired (bonds cleared)"); break;
     default: break;
     }
     return 0;

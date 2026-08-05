@@ -3,12 +3,15 @@
 #include "blesync.h"
 #include "apmode.h"
 #include "filesrv.h"
+#include "settings.h"
+#include "viblog.h"
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_timer.h"
+#include "esp_netif.h"
 #include "esp_log.h"
 
 static const char *TAG = "netmgr";
@@ -20,6 +23,7 @@ typedef enum {
     MSG_SOFTAP_STOP,
     MSG_PROVISION_CREDS,   // app wrote WIFI_CREDS (creds in s_pend_ssid/s_pend_pass)
     MSG_FORGET,
+    MSG_SET_MODE,          // switch pref_mode (s_pend_wlan)
     MSG_STA_GOT_IP,
     MSG_STA_DISCONNECTED,
 } msg_t;
@@ -36,8 +40,18 @@ static int           s_sta_retries;
 static bool          s_softap_from_sync;   // remember the base mode to return to
 static int64_t       s_sta_refail_ms;      // next slow STA re-attempt (ms uptime)
 static char          s_pend_ssid[33], s_pend_pass[65];   // creds awaiting verification
+static bool          s_pend_wlan;          // pref_mode requested via MSG_SET_MODE
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+
+static void get_sta_ip(char *out, int cap)
+{
+    snprintf(out, cap, "0.0.0.0");
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ipi;
+    if (sta && esp_netif_get_ip_info(sta, &ipi) == ESP_OK && ipi.ip.addr)
+        snprintf(out, cap, IPSTR, IP2STR(&ipi.ip));
+}
 
 net_state_t netmgr_state(void)       { return s_state; }
 bool        netmgr_internet_up(void) { return s_state == NET_STA_CONNECTED; }
@@ -51,6 +65,7 @@ const char *netmgr_state_str(net_state_t s)
     case NET_STA_FAILED:     return "sta-failed";
     case NET_SYNC_IDLE:      return "sync-idle";
     case NET_SOFTAP:         return "softap";
+    case NET_WLAN_SERVE:     return "wlan-serve";
     case NET_VERIFYING:      return "verifying";
     default:                 return "?";
     }
@@ -67,6 +82,7 @@ static void post(msg_t m)
 void netmgr_request_softap(void)      { post(MSG_SOFTAP_START); }
 void netmgr_request_stop_softap(void) { post(MSG_SOFTAP_STOP); }
 void netmgr_request_forget_wifi(void) { post(MSG_FORGET); }
+void netmgr_request_set_mode(bool wlan) { s_pend_wlan = wlan; post(MSG_SET_MODE); }
 
 void netmgr_request_provision(const char *ssid, const char *pass)
 {
@@ -149,23 +165,67 @@ static void exit_softap(void)
     else                    enter_sta();
 }
 
+// WLAN file serving: STA stays connected, the file server runs on the LAN, the phone
+// pulls from the device's IP (no SoftAP join). BLE is still torn down for the
+// transfer (Stage 0: BLE + httpd don't fit), and restored after.
+static void enter_wlan_serve(void)
+{
+    if (!filesrv_start()) { ESP_LOGE(TAG, "wlan-serve: filesrv failed"); return; }
+    char ip[16];
+    get_sta_ip(ip, sizeof(ip));
+    blesync_notify_wlan_handoff(ip, 8080, filesrv_token());
+    vTaskDelay(pdMS_TO_TICKS(1000));            // let the notify reach the phone
+    blesync_stop();
+    s_state = NET_WLAN_SERVE;
+    ESP_LOGI(TAG, "-> wlan-serve (%s:8080)", ip);
+}
+
+static void exit_wlan_serve(void)
+{
+    filesrv_stop();
+    enter_sta();                                // STA still up; restart blesync + resync
+}
+
 // --- message handling -------------------------------------------------------
 
 static void handle(msg_t m)
 {
     switch (m) {
     case MSG_SOFTAP_START:
-        if (s_state == NET_SYNC_IDLE || s_state == NET_STA_CONNECTED ||
-            s_state == NET_STA_CONNECTING || s_state == NET_STA_FAILED)
-            enter_softap();
+        // One SD writer at a time: don't raise a file server while viblog records.
+        if (viblog_is_running()) {
+            ESP_LOGW(TAG, "SD busy (vibration log) -> refusing sync");
+            break;
+        }
+        if (s_state == NET_STA_CONNECTED) {
+            enter_wlan_serve();                  // on home WiFi -> serve over the LAN
+        } else if (s_state == NET_SYNC_IDLE || s_state == NET_STA_CONNECTING ||
+                   s_state == NET_STA_FAILED) {
+            enter_softap();                      // no LAN -> SoftAP
+        }
         break;
 
     case MSG_SOFTAP_STOP:
-        if (s_state == NET_SOFTAP) exit_softap();
+        if      (s_state == NET_SOFTAP)     exit_softap();
+        else if (s_state == NET_WLAN_SERVE) exit_wlan_serve();
+        break;
+
+    case MSG_SET_MODE:
+        settings_set_wlan_mode(s_pend_wlan);
+        if (provisioning_has_creds()) {
+            if (s_pend_wlan && s_state == NET_SYNC_IDLE) {
+                enter_sta();                     // BLE mode -> WLAN: join home WiFi
+            } else if (!s_pend_wlan && (s_state == NET_STA_CONNECTING ||
+                       s_state == NET_STA_CONNECTED || s_state == NET_STA_FAILED)) {
+                provisioning_sta_disconnect();   // WLAN -> BLE: drop STA, BLE only
+                enter_sync();
+            }
+        }
+        ESP_LOGI(TAG, "pref_mode := %s", s_pend_wlan ? "WLAN" : "BLE");
         break;
 
     case MSG_PROVISION_CREDS:
-        if (s_state != NET_SOFTAP) enter_verifying();   // not while mid-transfer
+        if (s_state != NET_SOFTAP && s_state != NET_WLAN_SERVE) enter_verifying();
         break;
 
     case MSG_FORGET:                             // live: erase creds -> sync-idle (no reboot)
@@ -224,6 +284,10 @@ static void tick(void)
         ESP_LOGW(TAG, "SoftAP unused -> teardown");
         exit_softap();
     }
+    if (s_state == NET_WLAN_SERVE && filesrv_idle_ms() > SOFTAP_IDLE_MS) {
+        ESP_LOGW(TAG, "wlan-serve idle -> teardown");
+        exit_wlan_serve();
+    }
     // A provisioned device that couldn't join keeps retrying slowly instead of
     // staying offline (WiFi may be briefly down).
     if (s_state == NET_STA_FAILED && now_ms() > s_sta_refail_ms) {
@@ -239,10 +303,12 @@ static void netmgr_task(void *arg)
     (void)arg;
 
     // Initial mode, decided once at boot -- no prov_pending, no reboot branch.
-    bool creds = provisioning_has_creds();
-    ESP_LOGI(TAG, "boot: has_creds=%d", creds);
-    if (creds) enter_sta();
-    else       enter_sync();
+    // Provisioned + WLAN pref -> join home WiFi; provisioned + BLE pref (or no
+    // creds) -> sync-idle (blesync up, STA off).
+    bool creds = provisioning_has_creds(), wlan = settings_wlan_mode();
+    ESP_LOGI(TAG, "boot: has_creds=%d wlan_mode=%d", creds, wlan);
+    if (creds && wlan) enter_sta();
+    else               enter_sync();
 
     for (;;) {
         msg_t m;

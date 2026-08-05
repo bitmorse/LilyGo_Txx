@@ -8,3 +8,8 @@ void settings_init(void);                  // load cached values from NVS
 
 bool settings_boot_sound(void);            // play the chiptune on boot?
 void settings_set_boot_sound(bool on);     // persist + update the cache
+
+// Preferred connectivity when provisioned: true = WLAN (join home WiFi),
+// false = BLE (WiFi off, sync over BLE/SoftAP). Default WLAN.
+bool settings_wlan_mode(void);
+void settings_set_wlan_mode(bool wlan);

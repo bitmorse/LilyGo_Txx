@@ -25,8 +25,9 @@ typedef enum {
     NET_STA_CONNECTING,   // joining home WiFi (provisioned)
     NET_STA_CONNECTED,    // home WiFi up + IP -> internet features + SNTP
     NET_STA_FAILED,       // couldn't join after retries
-    NET_SYNC_IDLE,        // no creds: blesync advertising, radio idle
+    NET_SYNC_IDLE,        // no creds, or BLE pref: blesync advertising, STA off
     NET_SOFTAP,           // File Sync SoftAP + HTTP server up, BLE torn down
+    NET_WLAN_SERVE,       // STA stays up; file server on the LAN, BLE torn down
     NET_VERIFYING,        // candidate creds written over BLE; trying to join
 } net_state_t;
 
@@ -42,10 +43,11 @@ const char *netmgr_state_str(net_state_t s);
 bool netmgr_internet_up(void);
 
 // --- requests (safe from any task: LVGL callback, HTTP handler, BLE callback) ---
-void netmgr_request_softap(void);        // start a File Sync SoftAP session
+void netmgr_request_softap(void);        // start a file-sync session (SoftAP or WLAN)
 void netmgr_request_stop_softap(void);   // end it -> return to the base mode
 void netmgr_request_provision(const char *ssid, const char *pass);  // store + verify creds
 void netmgr_request_forget_wifi(void);   // erase creds -> sync-idle (live, no reboot)
+void netmgr_request_set_mode(bool wlan); // pref_mode: true=WLAN (join WiFi), false=BLE
 
 // --- internal events, posted by the WiFi/IP event handler in provisioning.c ---
 typedef enum {

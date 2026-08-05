@@ -364,10 +364,16 @@ bool filesrv_start(void)
     // mDNS multicast still works). Keep the radio awake while serving files.
     esp_wifi_set_ps(WIFI_PS_NONE);
 
-    // mDNS so the file server is reachable at http://t10.local:8080 for testing.
+    // mDNS: per-device hostname t10-XXXX.local (last 2 MAC bytes) so multiple
+    // devices coexist on one LAN. This is the WLAN-path discovery name.
     if (mdns_init() == ESP_OK) {
-        mdns_hostname_set("t10");
+        uint8_t mac[6] = {0};
+        esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+        char host[16];
+        snprintf(host, sizeof(host), "t10-%02x%02x", mac[4], mac[5]);
+        mdns_hostname_set(host);
         mdns_service_add(NULL, "_http", "_tcp", PORT, NULL, 0);
+        ESP_LOGI(TAG, "mDNS: http://%s.local:%d", host, PORT);
     }
 
     // Precompute sha256 sidecars in the background so the manifest never blocks

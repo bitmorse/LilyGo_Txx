@@ -614,6 +614,7 @@ static void filesync_cb(lv_event_t *e)
 // --- Settings ---------------------------------------------------------------
 
 static lv_obj_t *s_bootsnd_lbl;
+static lv_obj_t *s_mode_lbl;
 
 static void boot_sound_cb(lv_event_t *e)
 {
@@ -622,6 +623,17 @@ static void boot_sound_cb(lv_event_t *e)
     settings_set_boot_sound(on);
     if (s_bootsnd_lbl)
         lv_label_set_text_fmt(s_bootsnd_lbl, "Boot sound: %s", on ? "ON" : "OFF");
+}
+
+// Connectivity mode: WLAN (join home WiFi) vs BLE (WiFi off, sync over BLE/SoftAP).
+// Switches live via netmgr; the label reflects the new preference.
+static void mode_cb(lv_event_t *e)
+{
+    (void)e;
+    bool wlan = !settings_wlan_mode();
+    netmgr_request_set_mode(wlan);
+    if (s_mode_lbl)
+        lv_label_set_text_fmt(s_mode_lbl, "Mode: %s", wlan ? "WLAN" : "BLE");
 }
 
 static void settings_cb(lv_event_t *e)
@@ -638,6 +650,14 @@ static void settings_cb(lv_event_t *e)
     lv_obj_center(s_bootsnd_lbl);
     lv_obj_add_event_cb(b, boot_sound_cb, LV_EVENT_CLICKED, NULL);
     page_focus_stop(b);
+
+    lv_obj_t *mb = lv_button_create(page);         // connectivity mode toggle
+    lv_obj_set_width(mb, lv_pct(100));
+    s_mode_lbl = lv_label_create(mb);
+    lv_label_set_text_fmt(s_mode_lbl, "Mode: %s", settings_wlan_mode() ? "WLAN" : "BLE");
+    lv_obj_center(s_mode_lbl);
+    lv_obj_add_event_cb(mb, mode_cb, LV_EVENT_CLICKED, NULL);
+    page_focus_stop(mb);
 
     lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
     lv_screen_load(page);
