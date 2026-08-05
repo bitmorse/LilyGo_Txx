@@ -372,7 +372,9 @@ bool filesrv_start(void)
 
     // Precompute sha256 sidecars in the background so the manifest never blocks
     // on hashing (reading multi-MB files off the SPI SD is slow).
-    xTaskCreate(precache_task, "sha_cache", 8192, NULL, 3, NULL);
+    // 12288: manifest_precache() holds a ~2.5 KB names[] array on-stack and calls
+    // compute_sha256() (2 KB read buffer + mbedtls + FATFS) -- 8192 overflowed.
+    xTaskCreate(precache_task, "sha_cache", 12288, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "file server on :%d  (token=%s)  http://t10.local:%d/info",
              PORT, s_token, PORT);
