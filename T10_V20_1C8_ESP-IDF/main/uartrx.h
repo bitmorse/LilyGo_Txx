@@ -34,3 +34,8 @@ unsigned uartrx_bytes(void);
 // Hex of the most recently received bytes (up to a few), for the UI. Writes a
 // NUL-terminated string into out; returns its length.
 int uartrx_last_hex(char *out, int cap);
+
+// The session is recorded to /sdcard/uartNNNN.mcap (channels /uart_rx raw bytes,
+// /state, /meta). "" if no SD card / not recording. Bytes written so far.
+const char *uartrx_rec_path(void);
+uint64_t    uartrx_rec_bytes(void);

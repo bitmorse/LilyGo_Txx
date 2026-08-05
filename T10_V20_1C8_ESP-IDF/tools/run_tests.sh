@@ -28,6 +28,9 @@ $CC $CFLAGS -o "$OUT/test_uartrx_ring" test/test_uartrx_ring.c main/uartrx_ring.
 $CC $CFLAGS -o "$OUT/test_uartrx_sm" test/test_uartrx_sm.c main/uartrx_sm.c
 "$OUT/test_uartrx_sm" || fail=1
 
+$CC $CFLAGS -o "$OUT/test_uartrx_rec" test/test_uartrx_rec.c main/uartrx_rec.c
+"$OUT/test_uartrx_rec" || fail=1
+
 echo
 echo "== integration: write a real MCAP with the production units =="
 $CC $CFLAGS -o "$OUT/integration_write" \
@@ -42,6 +45,16 @@ if "$PY" -c "import mcap, google.protobuf" 2>/dev/null; then
 else
     echo "  (skipped reference validation -- 'mcap' + 'protobuf' not installed;"
     echo "   uv pip install --python .venv mcap protobuf  to enable it)"
+fi
+
+# UART RX MCAP: schemaless /uart_rx raw + /state,/meta json.
+$CC $CFLAGS -o "$OUT/integration_uart_write" \
+    test/integration_uart_write.c main/mcap.c main/uartrx_rec.c
+"$OUT/integration_uart_write" "$OUT/uart_test.mcap"
+if "$PY" -c "import mcap" 2>/dev/null; then
+    "$PY" test/validate_uart_mcap.py "$OUT/uart_test.mcap" || fail=1
+else
+    echo "  (skipped uart mcap validation -- 'mcap' not installed)"
 fi
 
 echo

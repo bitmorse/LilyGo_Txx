@@ -23,6 +23,7 @@ idf_component_register(
         "uartrx.c"
         "uartrx_ring.c"
         "uartrx_sm.c"
+        "uartrx_rec.c"
         "settings.c"
         "blesync.c"
         "lvgl_port.c"

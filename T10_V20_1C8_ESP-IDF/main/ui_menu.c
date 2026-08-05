@@ -680,34 +680,44 @@ static void uart_update(lv_timer_t *t)
     (void)t;
     if (!s_uart_label) return;
     uartrx_state_t st = uartrx_state();
+    char body[200];
+    int off;
     switch (st) {
     case UARTRX_WAIT:
-        lv_label_set_text(s_uart_label,
-            "WAIT\n\nWaiting for tool…\nGPIO21 HIGH (no tool)");
+        off = snprintf(body, sizeof(body), "WAIT\n\nWaiting for tool…\nGPIO21 HIGH (no tool)");
         break;
-    case UARTRX_CHARGING: {
-        long s = (long)(uartrx_state_elapsed_ms() / 1000);
-        lv_label_set_text_fmt(s_uart_label,
-            "CHARGING\n\nTool inserted (LOW)\ncharging %lds / 600s", s);
+    case UARTRX_CHARGING:
+        off = snprintf(body, sizeof(body), "CHARGING\n\nTool inserted (LOW)\ncharging %lds / 600s",
+                       (long)(uartrx_state_elapsed_ms() / 1000));
         break;
-    }
     case UARTRX_DATA: {
         char hex[3 * 8 + 1];
         uartrx_last_hex(hex, sizeof(hex));
-        lv_label_set_text_fmt(s_uart_label,
-            "DATA\n\nbytes: %u\nlast: %s", uartrx_bytes(), hex[0] ? hex : "-");
+        off = snprintf(body, sizeof(body), "DATA\n\nbytes: %u\nlast: %s",
+                       uartrx_bytes(), hex[0] ? hex : "-");
         break;
     }
     case UARTRX_FAULT:
-        lv_label_set_text(s_uart_label,
-            "FAULT\n\nNo UART after 10 min\ncheck / replace tool");
+        off = snprintf(body, sizeof(body), "FAULT\n\nNo UART after 10 min\ncheck / replace tool");
         break;
-    case UARTRX_REST:
     default:
-        lv_label_set_text(s_uart_label,
-            "REST\n\nGPIO21 @ 9600 8N1\nPress Start to arm");
+        off = snprintf(body, sizeof(body), "REST\n\nGPIO21 @ 9600 8N1\nPress Start to arm");
         break;
     }
+    if (off < 0 || off >= (int)sizeof(body)) off = (int)sizeof(body) - 1;
+
+    // Recording footer (same file spans the whole session).
+    const char *p = uartrx_rec_path();
+    if (p[0]) {
+        const char *base = strrchr(p, '/');
+        base = base ? base + 1 : p;
+        snprintf(body + off, sizeof(body) - off, "\n\nrec %s  %lluKB",
+                 base, (unsigned long long)(uartrx_rec_bytes() / 1024));
+    } else {
+        snprintf(body + off, sizeof(body) - off, "\n\nrec: off (no SD)");
+    }
+    lv_label_set_text(s_uart_label, body);
+
     if (s_uart_btn_label)
         lv_label_set_text(s_uart_btn_label,
             st == UARTRX_REST ? LV_SYMBOL_PLAY " Start"
@@ -743,6 +753,7 @@ static void uart_cb(lv_event_t *e)
     lv_obj_add_event_cb(b, uart_toggle_cb, LV_EVENT_CLICKED, NULL);
     page_focus_stop(b);
 
+    uartrx_start();                      // arm + begin recording on page entry
     uart_update(NULL);
     s_uart_timer = lv_timer_create(uart_update, 300, NULL);
 

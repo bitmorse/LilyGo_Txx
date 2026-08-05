@@ -1,14 +1,21 @@
 #include "uartrx.h"
 #include "uartrx_sm.h"
 #include "uartrx_ring.h"
+#include "uartrx_rec.h"
+#include "mcap.h"
+#include "sdcard.h"
+#include "provisioning.h"            // time_now_ns(), time_is_synced(), service name
 
 #include <string.h>
+#include <stdio.h>
+#include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 
 static const char *TAG = "uartrx";
@@ -19,6 +26,12 @@ static const char *TAG = "uartrx";
 #define RX_BUF      1024              // driver RX ring (> HW FIFO 128)
 #define POLL_MS     20                // line/UART poll cadence
 #define DEBOUNCE_MS 60                // LOW held this long = tool holding the line (not UART)
+#define HEARTBEAT_MS 1000             // periodic /state record + fflush
+
+// MCAP channel ids (schemaless: schema_id 0).
+#define CH_UART     1                 // /uart_rx : raw bytes as received
+#define CH_STATE    2                 // /state   : json, SM transitions + heartbeat
+#define CH_META     3                 // /meta    : json, device info (one-shot)
 
 // One monitor task drives the pure state machine (uartrx_sm): it polls the debounced
 // GPIO level and, while a tool is docked, the UART, then performs the ATTACH/DETACH
@@ -39,11 +52,19 @@ static volatile int64_t        s_since_ms;
 static uartrx_ring_t           s_ring;
 static portMUX_TYPE            s_ring_mux = portMUX_INITIALIZER_UNLOCKED;
 
+// MCAP recording (monitor-task-owned). /sdcard/uartNNNN.mcap; skipped if no SD.
+static FILE                   *s_fp;
+static mcap_writer_t           s_mcap;
+static char                    s_rec_path[40];
+static volatile uint64_t       s_rec_bytes;
+
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
 uartrx_state_t uartrx_state(void)         { return s_state; }
 unsigned       uartrx_bytes(void)         { return s_bytes; }
 int64_t        uartrx_state_elapsed_ms(void) { return now_ms() - s_since_ms; }
+uint64_t       uartrx_rec_bytes(void)     { return s_rec_bytes; }
+const char    *uartrx_rec_path(void)      { return s_fp ? s_rec_path : ""; }
 
 int uartrx_last_hex(char *out, int cap)
 {
@@ -115,11 +136,77 @@ static void detach_uart(void)
     set_rest_pin();                    // back to a plain input for line polling
 }
 
+// --- MCAP recording (all on the monitor task; no-ops if SD/open failed) ------
+
+static bool next_path(char *out, int n)
+{
+    for (int i = 0; i < 10000; i++) {
+        snprintf(out, n, "/sdcard/uart%04d.mcap", i);
+        struct stat st;
+        if (stat(out, &st) != 0) return true;       // doesn't exist -> use it
+    }
+    return false;
+}
+
+static void rec_write_state(uartrx_state_t st)
+{
+    if (!s_fp) return;
+    char json[80];
+    int n = uartrx_rec_state_json(json, sizeof(json), uartrx_state_str(st),
+                                  s_bytes, (long long)(now_ms() - s_since_ms));
+    uint64_t t = time_now_ns();
+    if (mcap_write_message(&s_mcap, CH_STATE, t, t, (const uint8_t *)json, n))
+        s_rec_bytes += (uint64_t)n + 22;
+}
+
+static void rec_open(void)
+{
+    if (!sd_mount()) { ESP_LOGW(TAG, "no SD -> not recording"); return; }
+    if (!next_path(s_rec_path, sizeof(s_rec_path))) return;
+    s_fp = fopen(s_rec_path, "wb");
+    if (!s_fp) { ESP_LOGW(TAG, "rec open failed"); return; }
+    setvbuf(s_fp, NULL, _IOFBF, 8 * 1024);         // fewer, larger SD writes
+
+    if (!mcap_begin(&s_mcap, s_fp)) { fclose(s_fp); s_fp = NULL; return; }
+    mcap_add_channel(&s_mcap, CH_UART,  0, "/uart_rx", "application/octet-stream");
+    mcap_add_channel(&s_mcap, CH_STATE, 0, "/state",   "json");
+    mcap_add_channel(&s_mcap, CH_META,  0, "/meta",    "json");
+    s_rec_bytes = 0;
+
+    char meta[128];
+    const esp_app_desc_t *app = esp_app_get_description();
+    int mn = uartrx_rec_meta_json(meta, sizeof(meta), app->version,
+                                  provisioning_service_name(), UART_BAUD, RX_GPIO,
+                                  time_is_synced());
+    uint64_t t = time_now_ns();
+    mcap_write_message(&s_mcap, CH_META, t, t, (const uint8_t *)meta, mn);
+    rec_write_state(s_sm.state);
+    ESP_LOGI(TAG, "recording -> %s", s_rec_path);
+}
+
+static void rec_write_uart(const uint8_t *buf, int n)
+{
+    if (!s_fp || n <= 0) return;
+    uint64_t t = time_now_ns();
+    if (mcap_write_message(&s_mcap, CH_UART, t, t, buf, (uint32_t)n))
+        s_rec_bytes += (uint64_t)n + 22;
+}
+
+static void rec_close(void)
+{
+    if (!s_fp) return;
+    mcap_close(&s_mcap);
+    fclose(s_fp);
+    s_fp = NULL;
+    ESP_LOGI(TAG, "recording closed (%llu bytes)", (unsigned long long)s_rec_bytes);
+}
+
 static void monitor_task(void *arg)
 {
     (void)arg;
     set_rest_pin();                    // WAIT polls the line as a plain input
-    int64_t low_streak = 0;
+    rec_open();                        // open uartNNNN.mcap (skipped if no SD)
+    int64_t low_streak = 0, last_hb = now_ms();
     uartrx_state_t prev = s_sm.state;
     uint8_t buf[256];
 
@@ -151,6 +238,7 @@ static void monitor_task(void *arg)
                         taskENTER_CRITICAL(&s_ring_mux);
                         uartrx_ring_push(&s_ring, buf, n);
                         taskEXIT_CRITICAL(&s_ring_mux);
+                        rec_write_uart(buf, n);        // raw bytes -> /uart_rx
                     }
                 } else {
                     saw_break = true;              // break / framing / overflow (charging low)
@@ -170,13 +258,20 @@ static void monitor_task(void *arg)
         s_since_ms = s_sm.since_ms;
         if (s_sm.state != prev) {
             ESP_LOGI(TAG, "%s -> %s", uartrx_state_str(prev), uartrx_state_str(s_sm.state));
+            rec_write_state(s_sm.state);   // transition -> /state
             prev = s_sm.state;
+        }
+        if (now - last_hb >= HEARTBEAT_MS) {  // periodic /state + flush to bound loss
+            last_hb = now;
+            rec_write_state(s_sm.state);
+            if (s_fp) fflush(s_fp);
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
     }
 
-    // Stop requested -> REST: detach UART (if any), restore GPIO21 to input/no-pull.
+    // Stop requested -> REST: close the recording, detach UART, restore GPIO21.
     uartrx_sm_stop(&s_sm, now_ms());
+    rec_close();
     if (s_uart_attached) detach_uart();
     else                 set_rest_pin();
     s_state = UARTRX_REST;
