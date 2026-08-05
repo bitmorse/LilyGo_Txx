@@ -22,6 +22,9 @@ $CC $CFLAGS -o "$OUT/test_accel_encode" test/test_accel_encode.c main/accel_enco
 $CC $CFLAGS -o "$OUT/test_mcap" test/test_mcap.c main/mcap.c
 "$OUT/test_mcap" || fail=1
 
+$CC $CFLAGS -o "$OUT/test_uartrx_ring" test/test_uartrx_ring.c main/uartrx_ring.c
+"$OUT/test_uartrx_ring" || fail=1
+
 echo
 echo "== integration: write a real MCAP with the production units =="
 $CC $CFLAGS -o "$OUT/integration_write" \

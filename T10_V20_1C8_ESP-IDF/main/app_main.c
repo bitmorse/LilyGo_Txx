@@ -29,6 +29,7 @@
 #include "lvgl_port.h"
 #include "ui_menu.h"
 #include "settings.h"
+#include "uartrx.h"
 #include "boot_image.h"
 
 static const char *TAG = "app";
@@ -44,6 +45,7 @@ void app_main(void)
     imu_init();
     provisioning_hw_init();// NVS + netif + esp_wifi_init (no mode/start yet)
     settings_init();       // load user prefs (needs NVS, inited above)
+    uartrx_init();         // GPIO21 -> REST (input, no pull); UART attached on demand
 
     // Boot splash image, and the cute melody only if enabled in Settings.
     st7735_draw_image(0, 0, BOOT_IMAGE_W, BOOT_IMAGE_H, boot_image);

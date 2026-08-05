@@ -10,6 +10,7 @@
 #include "viblog.h"
 #include "apmode.h"
 #include "filesrv.h"
+#include "uartrx.h"
 #include "settings.h"
 
 #include <stdio.h>
@@ -668,6 +669,65 @@ static void reboot_cb(lv_event_t *e)
     esp_restart();
 }
 
+// --- UART RX on GPIO21 (9600 8N1) -------------------------------------------
+
+static lv_obj_t   *s_uart_label;
+static lv_obj_t   *s_uart_btn_label;
+static lv_timer_t *s_uart_timer;
+
+static void uart_update(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_uart_label) return;
+    uartrx_state_t st = uartrx_state();
+    char hex[3 * 8 + 1];
+    uartrx_last_hex(hex, sizeof(hex));
+    lv_label_set_text_fmt(s_uart_label,
+        "State: %s\nGPIO21 @ 9600 8N1\n\nbytes: %u\nlast: %s",
+        uartrx_state_str(st), uartrx_bytes(), hex[0] ? hex : "-");
+    if (s_uart_btn_label)
+        lv_label_set_text(s_uart_btn_label,
+            st == UARTRX_DATA ? LV_SYMBOL_STOP " Stop (-> REST)"
+                              : LV_SYMBOL_PLAY " Start (-> DATA)");
+}
+
+static void uart_toggle_cb(lv_event_t *e)
+{
+    (void)e;
+    if (uartrx_state() == UARTRX_REST) uartrx_start();
+    else                               uartrx_stop();
+    uart_update(NULL);
+}
+
+static void uart_back_cb(lv_event_t *e)
+{
+    if (s_uart_timer) { lv_timer_delete(s_uart_timer); s_uart_timer = NULL; }
+    s_uart_label = s_uart_btn_label = NULL;
+    uartrx_stop();                       // leave the page in the REST state
+    back_cb(e);
+}
+
+static void uart_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *page = page_shell("UART RX");
+    s_uart_label = page_text(page, "State: REST");
+
+    lv_obj_t *b = lv_button_create(page);
+    lv_obj_set_width(b, lv_pct(100));
+    s_uart_btn_label = lv_label_create(b);
+    lv_obj_center(s_uart_btn_label);
+    lv_obj_add_event_cb(b, uart_toggle_cb, LV_EVENT_CLICKED, NULL);
+    page_focus_stop(b);
+
+    uart_update(NULL);
+    s_uart_timer = lv_timer_create(uart_update, 300, NULL);
+
+    page_button(page, LV_SYMBOL_LEFT " Back", uart_back_cb);
+    lv_screen_load(page);
+    lv_group_focus_obj(b);
+}
+
 // --- main menu builders -----------------------------------------------------
 
 static void make_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
@@ -720,6 +780,7 @@ void ui_menu_start(void)
     make_button(scr, "Sensors " LV_SYMBOL_RIGHT, sensors_cb);
     make_button(scr, "Vibration Log " LV_SYMBOL_RIGHT, vib_cb);
     make_button(scr, "File Sync " LV_SYMBOL_RIGHT, filesync_cb);
+    make_button(scr, "UART RX " LV_SYMBOL_RIGHT, uart_cb);
     make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
     make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Setup WiFi " LV_SYMBOL_RIGHT, wifi_setup_cb);

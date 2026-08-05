@@ -20,6 +20,8 @@ idf_component_register(
         "manifest.c"
         "filesrv.c"
         "apmode.c"
+        "uartrx.c"
+        "uartrx_ring.c"
         "settings.c"
         "blesync.c"
         "lvgl_port.c"
