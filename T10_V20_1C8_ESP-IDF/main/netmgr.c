@@ -104,9 +104,18 @@ static void enter_sync(void)
 
 static void enter_provisioning(void)
 {
+    // If the provisioning manager can't start, don't get stuck (prov_pending is set,
+    // so we'd reboot back here forever). Clear the flag and fall back to the normal
+    // mode for this device.
+    if (!provisioning_prov_start()) {
+        ESP_LOGE(TAG, "provisioning failed to start -> clear flag, fall back");
+        provisioning_set_prov_pending(false);
+        if (provisioning_has_creds()) enter_sta();
+        else                          enter_sync();
+        return;
+    }
     s_state = NET_PROVISIONING;
     s_prov_deadline_ms = now_ms() + PROV_TIMEOUT_MS;
-    provisioning_prov_start();                  // BLE WiFi-provisioning manager
     ESP_LOGI(TAG, "-> provisioning (BLE)");
 }
 
@@ -246,9 +255,11 @@ static void netmgr_task(void *arg)
     (void)arg;
 
     // Initial mode, decided once, at boot.
-    if (provisioning_prov_pending())      enter_provisioning();
-    else if (provisioning_has_creds())    enter_sta();
-    else                                  enter_sync();
+    bool pend = provisioning_prov_pending(), creds = provisioning_has_creds();
+    ESP_LOGI(TAG, "boot: prov_pending=%d has_creds=%d", pend, creds);
+    if (pend)       enter_provisioning();
+    else if (creds) enter_sta();
+    else            enter_sync();
 
     for (;;) {
         msg_t m;
@@ -261,5 +272,7 @@ void netmgr_start(void)
 {
     if (s_q) return;
     s_q = xQueueCreate(8, sizeof(msg_t));
-    xTaskCreate(netmgr_task, "netmgr", 4096, NULL, 6, NULL);
+    // 6144: enter_softap() runs filesrv_start() (sd_mount FAT + httpd_start + mdns)
+    // and blesync init/deinit on this task -- a deep chain for 4096.
+    xTaskCreate(netmgr_task, "netmgr", 6144, NULL, 6, NULL);
 }

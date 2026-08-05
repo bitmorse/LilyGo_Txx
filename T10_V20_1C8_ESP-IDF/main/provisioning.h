@@ -21,7 +21,7 @@ void provisioning_sta_disconnect(void); // drop the STA link (before raising Sof
 void provisioning_start_sntp(void);     // start SNTP once (on first GOT_IP)
 
 // --- BLE WiFi-provisioning mechanism (called by netmgr; boot-only mode) ---
-void provisioning_prov_start(void);     // init + start wifi_prov_mgr over BLE
+bool provisioning_prov_start(void);     // init + start wifi_prov_mgr over BLE; false on failure
 void provisioning_prov_stop(void);      // stop + deinit the provisioning manager
 
 // --- persistence ---

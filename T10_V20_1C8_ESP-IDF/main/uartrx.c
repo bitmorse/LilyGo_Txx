@@ -293,7 +293,9 @@ void uartrx_start(void)
     s_state = s_sm.state;
     s_since_ms = s_sm.since_ms;
     s_run = true;
-    xTaskCreate(monitor_task, "uartrx", 3072, NULL, 5, &s_task);
+    // 6144: the monitor task now writes MCAP to SD (fwrite -> FATFS -> sdspi is a
+    // deep call chain, like viblog's writer at 8192) on top of the 256 B read buffer.
+    xTaskCreate(monitor_task, "uartrx", 6144, NULL, 5, &s_task);
 }
 
 void uartrx_stop(void)

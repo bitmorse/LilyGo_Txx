@@ -169,7 +169,7 @@ void provisioning_sta_disconnect(void) { esp_wifi_disconnect(); }
 
 // --- BLE WiFi-provisioning mechanism ----------------------------------------
 
-void provisioning_prov_start(void)
+bool provisioning_prov_start(void)
 {
     wifi_prov_mgr_config_t config = {
         .scheme               = wifi_prov_scheme_ble,
@@ -178,14 +178,24 @@ void provisioning_prov_start(void)
         // never needed again in this boot.
         .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM,
     };
-    ESP_ERROR_CHECK(wifi_prov_mgr_init(config));
+    // NO ESP_ERROR_CHECK: a failure here must NOT abort -- prov_pending is still set,
+    // so an abort would reboot straight back into this failing path (a reboot loop).
+    // Return false and let netmgr clear the flag and fall back.
+    esp_err_t err = wifi_prov_mgr_init(config);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "prov_mgr_init: %s", esp_err_to_name(err)); return false; }
 
     // Distinct 128-bit service UUID for the provisioning GATT service.
     uint8_t uuid[16] = { 0xb4, 0xdf, 0x5a, 0x1c, 0x3f, 0x6b, 0xf4, 0xbf,
                          0xea, 0x4a, 0x82, 0x03, 0x04, 0x90, 0x1a, 0x02 };
     wifi_prov_scheme_ble_set_service_uuid(uuid);
-    ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(
-        WIFI_PROV_SECURITY_1, PROV_POP, s_service_name, NULL));
+    err = wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1, PROV_POP,
+                                           s_service_name, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "start_provisioning: %s", esp_err_to_name(err));
+        wifi_prov_mgr_deinit();
+        return false;
+    }
+    return true;
 }
 
 void provisioning_prov_stop(void)
@@ -210,11 +220,13 @@ bool provisioning_prov_pending(void)
 void provisioning_set_prov_pending(bool on)
 {
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, NVS_KEY_PEND, on ? 1 : 0);
-        nvs_commit(h);
-        nvs_close(h);
-    }
+    esp_err_t eo = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (eo != ESP_OK) { ESP_LOGE(TAG, "prov_pending open: %s", esp_err_to_name(eo)); return; }
+    esp_err_t es = nvs_set_u8(h, NVS_KEY_PEND, on ? 1 : 0);
+    esp_err_t ec = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "prov_pending := %d (set=%s commit=%s)", on,
+             esp_err_to_name(es), esp_err_to_name(ec));
 }
 
 void provisioning_forget(void)
