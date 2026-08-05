@@ -116,7 +116,7 @@ else:                                  OP_BLE
 
 | From | Event | To | Notes |
 |------|-------|----|-------|
-| OP_BLE | phone bonds (passkey ok) | OP_BLE | now **paired**; file sync unlocked; mint per-bond token |
+| OP_BLE | phone bonds (passkey ok) | OP_BLE | now **paired**; file sync unlocked |
 | OP_BLE | `WIFI_CREDS` written (paired) | OP_VERIFYING | candidate creds; NOT yet provisioned |
 | OP_VERIFYING | GOT_IP | OP_STA_UP | commit creds → **provisioned**; pref_mode←WLAN |
 | OP_VERIFYING | fail/timeout | OP_BLE | discard candidate; notify "prov failed"; stay unprovisioned |
@@ -167,14 +167,15 @@ App side (octanis-connect, not the Espressif app): bond to "add device"; write
   `mitm=1`, `bonding=1`): the device shows a 6-digit code, the app enters it. Prevents
   a random nearby phone from "adding" the device. Just-Works is the fallback only if a
   build has no display.
-- **WLAN auth = a persistent per-bond token, not the per-BLE-session token.** At
-  pairing (or first provision) the device mints a random secret bound to that phone and
-  returns it over the encrypted BLE link. The HTTP file server (SoftAP *and* STA/LAN)
-  accepts that token as a Bearer/`?token=`. This makes the WLAN path work even when BLE
-  is down (Stage 0 heap result), because the app already holds the token. Stored in NVS,
-  cleared on unpair/forget.
+- **HTTP auth = a per-session token delivered in the handoff.** Every sync session
+  starts with a BLE handoff (SoftAP or WLAN), which is where the fresh random token is
+  delivered over the encrypted link. The HTTP file server (SoftAP *and* STA/LAN) accepts
+  it as a Bearer/`?token=`. A persistent per-bond token is **not** needed: the WLAN pull
+  is always preceded by that BLE handoff, so the app already holds the token before BLE
+  is torn down for the transfer. (This is what the code does; `APP_BLE_CONTRACT.md` is
+  the wire authority.)
 - **Multiple phones:** allow up to **N bonds** (NimBLE `CONFIG_BT_NIMBLE_MAX_BONDS`,
-  e.g. 3). Each bond gets its own WLAN token. Re-pairing an existing phone replaces its
+  e.g. 3). Re-pairing an existing phone replaces its
   bond; a full bond store evicts the least-recently-used.
 - **Factory reset (physical, mandatory).** A **button-hold combo** (e.g. BTN1+BTN3 held
   ~5 s, or a dedicated hold) clears **all bonds + all creds + prefs** → S0, with an
@@ -233,7 +234,7 @@ decision logic is developed **red→green TDD** (like `uartrx_sm`).
 
 - **Stage 2 — Bonding, pairing & recovery.** NimBLE SM **passkey-display** bonding
   (6-digit on the TFT), `mitm=1`; `paired` = bond exists; encrypt control + creds;
-  per-bond WLAN token; multiple bonds (LRU-evict); `UNPAIR` opcode; **physical
+  multiple bonds (LRU-evict); `UNPAIR` opcode; **physical
   button-hold factory reset** (clear all bonds+creds+prefs → S0, on-screen confirm).
   Gates file sync on paired.
 
@@ -255,7 +256,8 @@ decision logic is developed **red→green TDD** (like `uartrx_sm`).
 1. WLAN sync = **device-as-server on STA + mDNS** (app pulls). Not cloud push.
 2. Mode switch = **UI toggle + app command + auto-fallback** (all three).
 3. Pairing = **passkey shown on the TFT** (MITM-protected), not Just-Works.
-4. WLAN auth = **persistent per-bond token** (works even when BLE is down).
+4. HTTP auth = **per-session token delivered in the BLE handoff** (which precedes
+   every sync, WLAN or SoftAP) — not a persistent per-bond secret.
 5. Provisioning/pairing done by **the octanis-connect app over blesync** (not the
    Espressif app).
 6. **BLE-in-WLAN-mode** (Stage 0 result): BLE **stays up in idle WLAN mode** (control),
