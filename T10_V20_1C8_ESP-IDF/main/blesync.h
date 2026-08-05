@@ -25,4 +25,8 @@ void blesync_stop(void);
 // before blesync_stop().
 void blesync_notify_handoff(void);
 
+// Notify the phone of the provisioning result of its last WIFI_CREDS write (netmgr
+// calls this after verification succeeds/fails).
+void blesync_notify_prov_result(bool ok, const char *err);
+
 bool blesync_active(void);

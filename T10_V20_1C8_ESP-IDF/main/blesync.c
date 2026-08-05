@@ -1,8 +1,9 @@
 #include "blesync.h"
 #include "apmode.h"
 #include "filesrv.h"
-#include "netmgr.h"                // netmgr_request_softap()/stop
+#include "netmgr.h"                // netmgr_request_softap()/stop/provision
 #include "provisioning.h"          // provisioning_is_connected()
+#include "wifi_creds.h"            // wifi_creds_parse()
 
 #include <string.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@ static const ble_uuid128_t s_svc_uuid    = SYNC_UUID(0x01);
 static const ble_uuid128_t s_info_uuid   = SYNC_UUID(0x02);
 static const ble_uuid128_t s_ctrl_uuid   = SYNC_UUID(0x03);
 static const ble_uuid128_t s_status_uuid = SYNC_UUID(0x04);
+static const ble_uuid128_t s_creds_uuid  = SYNC_UUID(0x05);   // WIFI_CREDS (WRITE)
 
 // --- control opcodes ----------------------------------------------------------
 #define OP_START_SOFTAP 0x11
@@ -97,6 +99,38 @@ static int status_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt
     return 0;                                  // notify-only; nothing to read
 }
 
+// WIFI_CREDS: the app writes "<ssid>\0<pass>" to provision. netmgr stores it as a
+// candidate and verifies live (GOT_IP commits; failure discards + notifies).
+static int creds_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)ch; (void)attr; (void)arg;
+    uint8_t buf[128];
+    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len == 0 || len > sizeof(buf)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    os_mbuf_copydata(ctxt->om, 0, len, buf);
+    char ssid[33], pass[65];
+    if (!wifi_creds_parse(buf, len, ssid, sizeof(ssid), pass, sizeof(pass))) {
+        ESP_LOGW(TAG, "WIFI_CREDS: bad payload");
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    ESP_LOGI(TAG, "WIFI_CREDS write: ssid='%s'", ssid);
+    netmgr_request_provision(ssid, pass);
+    return 0;
+}
+
+// Notify the phone with the provisioning result of its last WIFI_CREDS write.
+void blesync_notify_prov_result(bool ok, const char *err)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    char json[128];
+    int n = ok ? snprintf(json, sizeof(json), "{\"prov\":\"ok\"}")
+               : snprintf(json, sizeof(json), "{\"prov\":\"fail\",\"err\":\"%s\"}",
+                          err ? err : "");
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(json, n);
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_status_val_handle, om);
+    ESP_LOGI(TAG, "prov result: %s", json);
+}
+
 static const struct ble_gatt_svc_def s_gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -104,6 +138,7 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
         .characteristics = (struct ble_gatt_chr_def[]){
             { .uuid = &s_info_uuid.u,   .access_cb = info_access,   .flags = BLE_GATT_CHR_F_READ },
             { .uuid = &s_ctrl_uuid.u,   .access_cb = ctrl_access,   .flags = BLE_GATT_CHR_F_WRITE },
+            { .uuid = &s_creds_uuid.u,  .access_cb = creds_access,  .flags = BLE_GATT_CHR_F_WRITE },
             { .uuid = &s_status_uuid.u, .access_cb = status_access, .flags = BLE_GATT_CHR_F_NOTIFY,
               .val_handle = &s_status_val_handle },
             { 0 },

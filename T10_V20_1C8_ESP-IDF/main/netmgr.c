@@ -4,10 +4,10 @@
 #include "apmode.h"
 #include "filesrv.h"
 
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 
@@ -18,31 +18,28 @@ static const char *TAG = "netmgr";
 typedef enum {
     MSG_SOFTAP_START,
     MSG_SOFTAP_STOP,
-    MSG_PROVISION,
+    MSG_PROVISION_CREDS,   // app wrote WIFI_CREDS (creds in s_pend_ssid/s_pend_pass)
     MSG_FORGET,
     MSG_STA_GOT_IP,
     MSG_STA_DISCONNECTED,
-    MSG_PROV_SUCCESS,
-    MSG_PROV_FAIL,
 } msg_t;
 
 #define STA_MAX_RETRY      6           // fast retries before declaring STA_FAILED
 #define STA_REFAIL_MS      30000       // then a slow periodic re-attempt from failed
 #define SOFTAP_NOCLIENT_MS 120000      // no client joined -> tear the AP down
 #define SOFTAP_IDLE_MS     300000      // no HTTP traffic -> tear the AP down
-#define PROV_TIMEOUT_MS    300000      // no successful pairing -> reboot to sync
 #define TICK_MS            2000        // watchdog cadence
 
-static net_state_t     s_state = NET_BOOT;
-static QueueHandle_t   s_q;
-static int             s_sta_retries;
-static bool            s_softap_from_sync;  // remember the base mode to return to
-static int64_t         s_prov_deadline_ms;  // provisioning timeout (ms uptime)
-static int64_t         s_sta_refail_ms;     // next slow STA re-attempt (ms uptime)
+static net_state_t   s_state = NET_BOOT;
+static QueueHandle_t s_q;
+static int           s_sta_retries;
+static bool          s_softap_from_sync;   // remember the base mode to return to
+static int64_t       s_sta_refail_ms;      // next slow STA re-attempt (ms uptime)
+static char          s_pend_ssid[33], s_pend_pass[65];   // creds awaiting verification
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
-net_state_t netmgr_state(void)     { return s_state; }
+net_state_t netmgr_state(void)       { return s_state; }
 bool        netmgr_internet_up(void) { return s_state == NET_STA_CONNECTED; }
 
 const char *netmgr_state_str(net_state_t s)
@@ -54,7 +51,7 @@ const char *netmgr_state_str(net_state_t s)
     case NET_STA_FAILED:     return "sta-failed";
     case NET_SYNC_IDLE:      return "sync-idle";
     case NET_SOFTAP:         return "softap";
-    case NET_PROVISIONING:   return "provisioning";
+    case NET_VERIFYING:      return "verifying";
     default:                 return "?";
     }
 }
@@ -63,33 +60,39 @@ static void post(msg_t m)
 {
     // Bounded wait, never portMAX_DELAY: post() runs in WiFi/BLE event-task context,
     // and the manager task can be busy in a blocking transition (blesync_stop ~1 s).
-    // Dropping a best-effort event is fine; the watchdog/periodic retry recover.
     if (s_q && xQueueSend(s_q, &m, pdMS_TO_TICKS(500)) != pdTRUE)
         ESP_LOGW(TAG, "queue full; dropped msg %d", (int)m);
 }
 
-void netmgr_request_softap(void)       { post(MSG_SOFTAP_START); }
-void netmgr_request_stop_softap(void)  { post(MSG_SOFTAP_STOP); }
-void netmgr_request_provisioning(void) { post(MSG_PROVISION); }
-void netmgr_request_forget_wifi(void)  { post(MSG_FORGET); }
+void netmgr_request_softap(void)      { post(MSG_SOFTAP_START); }
+void netmgr_request_stop_softap(void) { post(MSG_SOFTAP_STOP); }
+void netmgr_request_forget_wifi(void) { post(MSG_FORGET); }
+
+void netmgr_request_provision(const char *ssid, const char *pass)
+{
+    snprintf(s_pend_ssid, sizeof(s_pend_ssid), "%s", ssid ? ssid : "");
+    snprintf(s_pend_pass, sizeof(s_pend_pass), "%s", pass ? pass : "");
+    post(MSG_PROVISION_CREDS);
+}
 
 void netmgr_post_event(net_event_t ev)
 {
     switch (ev) {
     case NETEV_STA_GOT_IP:       post(MSG_STA_GOT_IP); break;
     case NETEV_STA_DISCONNECTED: post(MSG_STA_DISCONNECTED); break;
-    case NETEV_PROV_SUCCESS:     post(MSG_PROV_SUCCESS); break;
-    case NETEV_PROV_FAIL:        post(MSG_PROV_FAIL); break;
     }
 }
 
 // --- transitions (all run on the manager task) ------------------------------
+// blesync (the BLE control channel) is up in EVERY state except NET_SOFTAP -- Stage 0
+// showed BLE + STA coexist fine (~50 KB free), but BLE + the HTTP file server do not.
 
 static void enter_sta(void)
 {
     s_state = NET_STA_CONNECTING;
     s_sta_retries = 0;
     provisioning_set_connected(false);
+    blesync_start();                            // control channel alongside STA
     provisioning_sta_connect();                 // set STA mode + start + connect
     ESP_LOGI(TAG, "-> sta-connecting");
 }
@@ -98,51 +101,42 @@ static void enter_sync(void)
 {
     s_state = NET_SYNC_IDLE;
     provisioning_set_connected(false);
-    blesync_start();                            // advertise for the phone
+    blesync_start();
     ESP_LOGI(TAG, "-> sync-idle (BLE advertising)");
 }
 
-static void enter_provisioning(void)
+// App wrote WIFI_CREDS: store as candidate and try to join. Only GOT_IP commits it
+// (-> sta-connected/provisioned); repeated failure discards it and returns to sync.
+static void enter_verifying(void)
 {
-    // If the provisioning manager can't start, don't get stuck (prov_pending is set,
-    // so we'd reboot back here forever). Clear the flag and fall back to the normal
-    // mode for this device.
-    if (!provisioning_prov_start()) {
-        ESP_LOGE(TAG, "provisioning failed to start -> clear flag, fall back");
-        provisioning_set_prov_pending(false);
-        if (provisioning_has_creds()) enter_sta();
-        else                          enter_sync();
-        return;
+    if (!provisioning_store_creds(s_pend_ssid, s_pend_pass)) {
+        blesync_notify_prov_result(false, "bad credentials");
+        return;                                 // stay where we are
     }
-    s_state = NET_PROVISIONING;
-    s_prov_deadline_ms = now_ms() + PROV_TIMEOUT_MS;
-    ESP_LOGI(TAG, "-> provisioning (BLE)");
+    s_state = NET_VERIFYING;
+    s_sta_retries = 0;
+    provisioning_set_connected(false);
+    blesync_start();
+    provisioning_sta_connect();
+    ESP_LOGI(TAG, "-> verifying '%s'", s_pend_ssid);
 }
 
 static void enter_softap(void)
 {
-    // Base mode we must restore when the session ends.
     s_softap_from_sync = (s_state == NET_SYNC_IDLE);
+    if (!s_softap_from_sync) provisioning_sta_disconnect();   // drop STA first
 
-    if (s_softap_from_sync) {
-        // blesync is up: bring the AP + server up first so the token exists, hand
-        // the creds+token to the still-connected phone over BLE, then free BLE for
-        // the transfer (BLE + SoftAP together starve the heap).
-        if (!apmode_start_session() || !filesrv_start()) {
-            ESP_LOGE(TAG, "softap start failed; back to sync");
-            apmode_stop(); blesync_start(); s_state = NET_SYNC_IDLE; return;
-        }
-        blesync_notify_handoff();
-        vTaskDelay(pdMS_TO_TICKS(1000));        // let the notify reach the phone
-        blesync_stop();                         // returns ~48 KB to the heap
-    } else {
-        // STA base (or failed): drop the STA link, then raise the AP. No BLE here.
-        provisioning_sta_disconnect();
-        if (!apmode_start_session() || !filesrv_start()) {
-            ESP_LOGE(TAG, "softap start failed; back to sta");
-            apmode_stop(); enter_sta(); return;
-        }
+    if (!apmode_start_session() || !filesrv_start()) {
+        ESP_LOGE(TAG, "softap start failed");
+        apmode_stop();
+        if (s_softap_from_sync) enter_sync(); else enter_sta();
+        return;
     }
+    // blesync is up in both bases now: hand the phone the creds+token over BLE, then
+    // free BLE for the transfer (BLE + SoftAP together starve the heap).
+    blesync_notify_handoff();
+    vTaskDelay(pdMS_TO_TICKS(1000));            // let the notify reach the phone
+    blesync_stop();
     s_state = NET_SOFTAP;
     ESP_LOGI(TAG, "-> softap (base=%s)", s_softap_from_sync ? "sync" : "sta");
 }
@@ -151,7 +145,7 @@ static void exit_softap(void)
 {
     filesrv_stop();
     apmode_stop();
-    if (s_softap_from_sync) enter_sync();
+    if (s_softap_from_sync) enter_sync();       // both restart blesync
     else                    enter_sta();
 }
 
@@ -170,23 +164,24 @@ static void handle(msg_t m)
         if (s_state == NET_SOFTAP) exit_softap();
         break;
 
-    case MSG_PROVISION:                          // one-way: reboot into provisioning
-        ESP_LOGW(TAG, "provisioning requested -> reboot");
-        provisioning_set_prov_pending(true);
-        vTaskDelay(pdMS_TO_TICKS(150));
-        esp_restart();
+    case MSG_PROVISION_CREDS:
+        if (s_state != NET_SOFTAP) enter_verifying();   // not while mid-transfer
         break;
 
-    case MSG_FORGET:                             // erase creds + reboot into sync
-        ESP_LOGW(TAG, "forget WiFi -> erase creds + reboot");
-        provisioning_set_prov_pending(false);
+    case MSG_FORGET:                             // live: erase creds -> sync-idle (no reboot)
+        ESP_LOGW(TAG, "forget WiFi -> sync-idle");
+        provisioning_sta_disconnect();
         provisioning_forget();
-        vTaskDelay(pdMS_TO_TICKS(150));
-        esp_restart();
+        enter_sync();
         break;
 
     case MSG_STA_GOT_IP:
-        if (s_state == NET_STA_CONNECTING || s_state == NET_STA_FAILED) {
+        if (s_state == NET_VERIFYING) {
+            blesync_notify_prov_result(true, NULL);      // provisioned + connected
+            ESP_LOGI(TAG, "verified -> provisioned");
+        }
+        if (s_state == NET_VERIFYING || s_state == NET_STA_CONNECTING ||
+            s_state == NET_STA_FAILED) {
             s_state = NET_STA_CONNECTED;
             s_sta_retries = 0;
             provisioning_set_connected(true);
@@ -196,34 +191,28 @@ static void handle(msg_t m)
         break;
 
     case MSG_STA_DISCONNECTED:
-        // Only meaningful while we're trying to hold a STA link. In SOFTAP the
-        // disconnect is us dropping STA on purpose -> ignore.
-        if (s_state == NET_STA_CONNECTING || s_state == NET_STA_CONNECTED) {
+        if (s_state == NET_VERIFYING) {          // candidate creds not confirmed
+            if (s_sta_retries++ < STA_MAX_RETRY) {
+                provisioning_sta_reconnect();
+            } else {
+                ESP_LOGW(TAG, "verify failed -> discard creds, back to sync");
+                provisioning_forget();
+                blesync_notify_prov_result(false, "wrong password or AP not found");
+                enter_sync();
+            }
+        } else if (s_state == NET_STA_CONNECTING || s_state == NET_STA_CONNECTED) {
             provisioning_set_connected(false);
             if (s_sta_retries++ < STA_MAX_RETRY) {
                 s_state = NET_STA_CONNECTING;
                 provisioning_sta_reconnect();
             } else {
                 s_state = NET_STA_FAILED;
-                s_sta_refail_ms = now_ms() + STA_REFAIL_MS;   // keep trying, slowly
+                s_sta_refail_ms = now_ms() + STA_REFAIL_MS;
                 ESP_LOGW(TAG, "-> sta-failed (%d retries); slow retry in %d s",
                          s_sta_retries, STA_REFAIL_MS / 1000);
             }
         }
         break;
-
-    case MSG_PROV_SUCCESS:                        // creds stored by the prov manager
-        if (s_state == NET_PROVISIONING) {
-            ESP_LOGI(TAG, "provisioning OK -> reboot to connect");
-            provisioning_set_prov_pending(false);
-            vTaskDelay(pdMS_TO_TICKS(1500));       // let the app see success first
-            esp_restart();
-        }
-        break;
-
-    case MSG_PROV_FAIL:
-        ESP_LOGW(TAG, "provisioning attempt failed (retry in app)");
-        break;                                    // stay advertising; user retries
     }
 }
 
@@ -235,13 +224,8 @@ static void tick(void)
         ESP_LOGW(TAG, "SoftAP unused -> teardown");
         exit_softap();
     }
-    if (s_state == NET_PROVISIONING && now_ms() > s_prov_deadline_ms) {
-        ESP_LOGW(TAG, "provisioning timed out -> reboot to sync");
-        provisioning_set_prov_pending(false);
-        esp_restart();
-    }
-    // A provisioned device that couldn't join (home WiFi briefly down) keeps trying
-    // slowly instead of staying offline until a reboot.
+    // A provisioned device that couldn't join keeps retrying slowly instead of
+    // staying offline (WiFi may be briefly down).
     if (s_state == NET_STA_FAILED && now_ms() > s_sta_refail_ms) {
         s_state = NET_STA_CONNECTING;
         s_sta_retries = 0;
@@ -254,12 +238,11 @@ static void netmgr_task(void *arg)
 {
     (void)arg;
 
-    // Initial mode, decided once, at boot.
-    bool pend = provisioning_prov_pending(), creds = provisioning_has_creds();
-    ESP_LOGI(TAG, "boot: prov_pending=%d has_creds=%d", pend, creds);
-    if (pend)       enter_provisioning();
-    else if (creds) enter_sta();
-    else            enter_sync();
+    // Initial mode, decided once at boot -- no prov_pending, no reboot branch.
+    bool creds = provisioning_has_creds();
+    ESP_LOGI(TAG, "boot: has_creds=%d", creds);
+    if (creds) enter_sta();
+    else       enter_sync();
 
     for (;;) {
         msg_t m;

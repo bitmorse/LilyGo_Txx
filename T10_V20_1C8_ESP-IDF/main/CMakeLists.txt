@@ -9,6 +9,7 @@ idf_component_register(
         "i2c_bus.c"
         "imu.c"
         "provisioning.c"
+        "wifi_creds.c"
         "netmgr.c"
         "airport.c"
         "audio.c"
@@ -30,7 +31,7 @@ idf_component_register(
         "ui_menu.c"
     INCLUDE_DIRS "."
     REQUIRES driver esp_wifi esp_netif esp_event nvs_flash esp_timer spi_flash esp_partition
-             wifi_provisioning bt esp_http_client esp-tls json esp_driver_dac
+             bt esp_http_client esp-tls json esp_driver_dac
              esp-libhelix-mp3 lvgl fatfs sdmmc esp_driver_sdspi esp_driver_spi
              esp_http_server mdns mbedtls esp_app_format
 )

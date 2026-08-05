@@ -270,47 +270,28 @@ static void board_info_cb(lv_event_t *e)
 static void repair_cb(lv_event_t *e)
 {
     (void)e;
-    netmgr_request_forget_wifi();        // erase creds + reboot into sync mode
+    netmgr_request_forget_wifi();        // erase creds -> sync-idle (live, no reboot)
 }
 
-// Kick off BLE WiFi provisioning. The manager reboots into a dedicated
-// provisioning mode (single-owner NimBLE), so show the QR the "ESP BLE
-// Provisioning" app scans, then the reboot happens.
-static void wifi_setup_start_cb(lv_event_t *e)
-{
-    (void)e;
-    netmgr_request_provisioning();       // sets flag + reboots into provisioning
-}
-
+// WiFi is provisioned by the phone app over BLE (it writes the WIFI_CREDS
+// characteristic) -- no on-device pairing flow. This page just shows status.
 static void wifi_setup_cb(lv_event_t *e)
 {
     (void)e;
     net_state_t st = netmgr_state();
     lv_obj_t *page = page_shell("WiFi Setup");
 
-    if (st == NET_PROVISIONING) {
-        // Already provisioning: show the QR to pair with.
-        lv_obj_t *qr = lv_qrcode_create(page);
-        lv_qrcode_set_size(qr, 88);
-        lv_qrcode_set_dark_color(qr, lv_color_black());
-        lv_qrcode_set_light_color(qr, lv_color_white());
-        char payload[96];
-        snprintf(payload, sizeof(payload),
-                 "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"ble\"}",
-                 provisioning_service_name(), provisioning_pop());
-        lv_qrcode_update(qr, payload, strlen(payload));
-        lv_obj_set_style_border_color(qr, lv_color_white(), 0);
-        lv_obj_set_style_border_width(qr, 3, 0);   // quiet zone for scanning
-
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s  PoP %s",
-                 provisioning_service_name(), provisioning_pop());
-        page_text(page, buf);
-    } else if (st == NET_STA_CONNECTED) {
-        page_text(page, "WiFi connected.\n\nUse Forget WiFi to\nchange network.");
+    if (st == NET_STA_CONNECTED) {
+        char ssid[33];
+        provisioning_ssid(ssid, sizeof(ssid));
+        lv_label_set_text_fmt(page_text(page, ""),
+            "Connected:\n%s\n\nUse Forget WiFi to\nchange network.", ssid);
+    } else if (st == NET_VERIFYING) {
+        page_text(page, "Checking WiFi\ncredentials...");
     } else {
-        page_text(page, "Start pairing to add\nhome WiFi. The device\nreboots into setup.");
-        page_button(page, LV_SYMBOL_WIFI " Start pairing", wifi_setup_start_cb);
+        lv_label_set_text_fmt(page_text(page, ""),
+            "No WiFi.\n\nAdd it from the app\n(device: %s).",
+            provisioning_service_name());
     }
 
     lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
