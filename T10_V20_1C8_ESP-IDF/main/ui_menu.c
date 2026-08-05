@@ -4,6 +4,7 @@
 #include "imu.h"
 #include "provisioning.h"
 #include "netmgr.h"
+#include "blesync.h"
 #include "airport.h"
 #include "audio.h"
 #include "radio.h"
@@ -756,6 +757,26 @@ static void make_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
     group_add_main(btn);
 }
 
+// BLE pairing passkey overlay: while blesync has a pending passkey, show it big on
+// the top layer over whatever page is up; dismiss when pairing completes.
+static void passkey_poll(lv_timer_t *t)
+{
+    (void)t;
+    static lv_obj_t *box;
+    uint32_t k = blesync_passkey();
+    if (k && !box) {
+        box = lv_label_create(lv_layer_top());
+        lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(box, lv_color_black(), 0);
+        lv_obj_set_style_text_color(box, lv_color_white(), 0);
+        lv_obj_set_style_pad_all(box, 10, 0);
+        lv_obj_set_style_text_align(box, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(box);
+    }
+    if (k && box) lv_label_set_text_fmt(box, "Pairing code\n\n%06u", (unsigned)k);
+    if (!k && box) { lv_obj_delete(box); box = NULL; }
+}
+
 void ui_menu_start(void)
 {
     s_main_scr = lv_screen_active();
@@ -787,6 +808,7 @@ void ui_menu_start(void)
     s_wifi_bars = make_wifi_bars(wrow);
     wifi_status_update(NULL);
     lv_timer_create(wifi_status_update, 2000, NULL);
+    lv_timer_create(passkey_poll, 300, NULL);   // BLE pairing code overlay
 
     // Actions -> sub-pages.
     make_button(scr, "ZRH Traffic " LV_SYMBOL_RIGHT, airport_cb);

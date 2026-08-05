@@ -13,12 +13,18 @@
 #include "esp_system.h"
 #include "esp_log.h"
 
+#include "esp_random.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/ble_sm.h"
+#include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+
+// Provided by the NimBLE store/config component (persists bonds to NVS).
+extern void ble_store_config_init(void);
 
 static const char *TAG = "blesync";
 
@@ -36,6 +42,7 @@ static const ble_uuid128_t s_creds_uuid  = SYNC_UUID(0x05);   // WIFI_CREDS (WRI
 // --- control opcodes ----------------------------------------------------------
 #define OP_START_SOFTAP 0x11
 #define OP_STOP_WIFI    0x12
+#define OP_UNPAIR       0x16
 
 // --- state --------------------------------------------------------------------
 static bool     s_active;
@@ -43,8 +50,18 @@ static uint8_t  s_own_addr_type;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_val_handle;
 static char     s_name[20];               // "Octanis-XXXX", also the SoftAP SSID
+static volatile uint32_t s_passkey;       // non-zero = pairing code to show on the TFT
 
-bool blesync_active(void) { return s_active; }
+bool     blesync_active(void)  { return s_active; }
+uint32_t blesync_passkey(void) { return s_passkey; }
+
+bool blesync_is_paired(void)
+{
+    if (!s_active) return false;
+    int count = 0;
+    ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &count);
+    return count > 0;
+}
 
 static void advertise(void);
 
@@ -88,6 +105,7 @@ static int ctrl_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *
     switch (op) {
     case OP_START_SOFTAP: netmgr_request_softap(); break;
     case OP_STOP_WIFI:    netmgr_request_stop_softap(); break;
+    case OP_UNPAIR:       ble_store_clear(); ESP_LOGI(TAG, "unpaired (bonds cleared)"); break;
     default: break;
     }
     return 0;
@@ -163,11 +181,40 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_passkey = 0;                         // dismiss any pairing code
         if (s_active) { ESP_LOGI(TAG, "disconnected, re-advertising"); advertise(); }
         break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         if (s_active) advertise();
         break;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        // DISPLAY_ONLY: we generate a 6-digit code, show it on the TFT, and inject it;
+        // the user types the same code into the app to complete MITM-protected pairing.
+        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            struct ble_sm_io io = { .action = BLE_SM_IOACT_DISP };
+            io.passkey = esp_random() % 1000000u;
+            s_passkey  = io.passkey ? io.passkey : 1;   // never 0 (0 == "none")
+            ESP_LOGW(TAG, "PAIRING passkey: %06u", (unsigned)io.passkey);
+            int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
+            if (rc) ESP_LOGE(TAG, "inject_io rc=%d", rc);
+        }
+        break;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        ESP_LOGI(TAG, "encryption change: status=%d, paired=%d",
+                 event->enc_change.status, blesync_is_paired());
+        s_passkey = 0;                         // pairing finished -> dismiss the code
+        break;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        // Peer wants to pair but a bond already exists -> drop it and let it re-pair.
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0)
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+
     default:
         break;
     }
@@ -234,6 +281,16 @@ bool blesync_start(void)
         return false;
     }
     ble_svc_gap_device_name_set(s_name);
+
+    // MITM-protected bonding: the device shows a 6-digit passkey on its TFT
+    // (io_cap = DISPLAY_ONLY) which the app user enters. Bonds persist in NVS.
+    ble_hs_cfg.sm_io_cap       = BLE_HS_IO_DISPLAY_ONLY;
+    ble_hs_cfg.sm_bonding      = 1;
+    ble_hs_cfg.sm_mitm         = 1;
+    ble_hs_cfg.sm_sc           = 1;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_store_config_init();                   // persist bonds to NVS
 
     ble_hs_cfg.sync_cb = on_sync;
     nimble_port_freertos_init(host_task);

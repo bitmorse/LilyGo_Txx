@@ -31,6 +31,8 @@
 #include "settings.h"
 #include "uartrx.h"
 #include "sdcard.h"
+#include "buttons.h"
+#include "nvs_flash.h"
 #include "boot_image.h"
 
 static const char *TAG = "app";
@@ -74,9 +76,24 @@ void app_main(void)
     netmgr_start();
 
     // app_main idles; LVGL runs in its own task. Keep a serial heartbeat.
-    int64_t last_beat = 0;
+    int64_t last_beat = 0, reset_since = 0;
     while (1) {
         int64_t now = esp_timer_get_time();
+
+        // Factory reset: hold ENTER (BTN_1) + DOWN (BTN_3) for 5 s -> wipe ALL NVS
+        // (BLE bonds + WiFi creds + settings) and reboot into S0. The only recovery
+        // when the device is bonded to a phone that is gone (docs/DEVICE_STATE.md).
+        if (buttons_level(BTN_1) && buttons_level(BTN_3)) {
+            if (!reset_since) reset_since = now;
+            else if (now - reset_since > 5 * 1000 * 1000) {
+                ESP_LOGW(TAG, "FACTORY RESET (buttons held) -> erase NVS + reboot");
+                nvs_flash_erase();
+                esp_restart();
+            }
+        } else {
+            reset_since = 0;
+        }
+
         if (now - last_beat > 5 * 1000 * 1000) {   // every 5 s
             last_beat = now;
             char ip[16] = "-";

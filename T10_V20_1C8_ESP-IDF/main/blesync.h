@@ -10,6 +10,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // Init NimBLE + the sync GATT service and start advertising as "Octanis-XXXX".
 // Returns false if BLE could not start. Re-callable after blesync_stop().
@@ -30,3 +31,10 @@ void blesync_notify_handoff(void);
 void blesync_notify_prov_result(bool ok, const char *err);
 
 bool blesync_active(void);
+
+// True if a phone is BLE-bonded ("device added"). Only meaningful while BLE is up.
+bool blesync_is_paired(void);
+
+// The 6-digit passkey to show on the TFT during pairing, or 0 if none is pending.
+// The UI polls this and displays it (io_cap = DISPLAY_ONLY MITM pairing).
+uint32_t blesync_passkey(void);
