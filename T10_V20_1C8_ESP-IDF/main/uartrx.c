@@ -29,7 +29,7 @@ static const char *TAG = "uartrx";
 #define HEARTBEAT_MS 1000             // periodic /state record + fflush
 
 // MCAP channel ids (schemaless: schema_id 0).
-#define CH_UART     1                 // /uart_rx : raw bytes as received
+#define CH_UART     1                 // /uart_rx : bytes as base64-JSON {"b64":".."}
 #define CH_STATE    2                 // /state   : json, SM transitions + heartbeat
 #define CH_META     3                 // /meta    : json, device info (one-shot)
 
@@ -168,7 +168,7 @@ static void rec_open(void)
     setvbuf(s_fp, NULL, _IOFBF, 8 * 1024);         // fewer, larger SD writes
 
     if (!mcap_begin(&s_mcap, s_fp)) { fclose(s_fp); s_fp = NULL; return; }
-    mcap_add_channel(&s_mcap, CH_UART,  0, "/uart_rx", "application/octet-stream");
+    mcap_add_channel(&s_mcap, CH_UART,  0, "/uart_rx", "json");
     mcap_add_channel(&s_mcap, CH_STATE, 0, "/state",   "json");
     mcap_add_channel(&s_mcap, CH_META,  0, "/meta",    "json");
     s_rec_bytes = 0;
@@ -187,9 +187,15 @@ static void rec_open(void)
 static void rec_write_uart(const uint8_t *buf, int n)
 {
     if (!s_fp || n <= 0) return;
+    // Wrap the raw bytes as {"b64":"..."} so the channel is well-known "json"
+    // (Foxglove rejects application/octet-stream). buf is at most sizeof(monitor
+    // buf) = 256 bytes -> 344 base64 chars + 10 wrapper + NUL.
+    char json[368];
+    int jn = uartrx_rec_uart_b64(json, sizeof(json), buf, n);
+    if (jn <= 0) return;                            // refused (won't fit) -- skip
     uint64_t t = time_now_ns();
-    if (mcap_write_message(&s_mcap, CH_UART, t, t, buf, (uint32_t)n))
-        s_rec_bytes += (uint64_t)n + 22;
+    if (mcap_write_message(&s_mcap, CH_UART, t, t, (const uint8_t *)json, (uint32_t)jn))
+        s_rec_bytes += (uint64_t)jn + 22;
 }
 
 static void rec_close(void)
