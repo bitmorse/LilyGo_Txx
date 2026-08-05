@@ -79,6 +79,16 @@ uint64_t time_now_ns(void)
     return (uint64_t)esp_timer_get_time() * 1000ULL;   // monotonic fallback
 }
 
+// Set the wall clock from a phone-supplied UTC time (BLE time-sync, no WiFi needed).
+// ms = Unix epoch milliseconds. Rejects anything before TIME_SYNCED_EPOCH so a bad
+// write can't push the RTC back into the "unsynced" range. Returns true on success.
+bool time_set_unix_ms(int64_t ms)
+{
+    if (ms < (int64_t)(TIME_SYNCED_EPOCH * 1000ULL)) return false;   // sanity: after 2023
+    struct timeval tv = { .tv_sec = (time_t)(ms / 1000), .tv_usec = (suseconds_t)((ms % 1000) * 1000) };
+    return settimeofday(&tv, NULL) == 0;
+}
+
 void provisioning_start_sntp(void)
 {
     static bool started = false;

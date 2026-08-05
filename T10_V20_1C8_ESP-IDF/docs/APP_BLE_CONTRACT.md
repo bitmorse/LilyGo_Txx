@@ -20,6 +20,7 @@ Base UUID `6F4300xx-A1B2-4C3D-9E5F-0123456789AB` (byte `xx` selects the characte
 | **Control** | `03` | Write | 1-byte opcodes (below) |
 | **Status** | `04` | Notify | pushed events: handoff, prov result, state snapshot |
 | **WIFI_CREDS** | `05` | Write | provision: `<ssid>\0<pass>` bytes |
+| **TIME** | `06` | Write | set the clock: 8-byte LE int64 UTC epoch **ms** |
 
 Device advertises as **`Octanis-XXXX`** (last 2 MAC bytes; also the SoftAP SSID).
 Subscribe to **Status** (`04`) right after connecting — it carries all async replies.
@@ -88,7 +89,16 @@ keeps retrying.
 a **physical factory reset**: hold ENTER + DOWN (the top and bottom buttons) for 5 s —
 wipes bonds + creds + settings.
 
+### 6. Set the device clock
+The device has no battery-backed RTC and only gets time from SNTP when it's on WiFi.
+In BLE mode there's no time source, so **write the current time to TIME (`06`)** after
+pairing: **8 bytes, little-endian, int64 = `Date.now()`** (UTC epoch milliseconds). The
+device sets its wall clock, so the watchface and MCAP recording timestamps are correct.
+Safe to write on every connect (cheap; the device ignores values before 2023). Requires
+the authenticated (bonded) link like the other writes.
+
 ## Notes
-- One sync session at a time; the device refuses a sync while vibration-logging (SD busy).
+- One sync session at a time; the device refuses a sync while vibration-logging OR the
+  UART-RX MCAP recording is active (SD single-writer).
 - The `token` is currently a fixed dev value and will become a per-bond secret with the
   pairing-required change; treat it as opaque.

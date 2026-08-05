@@ -38,6 +38,7 @@ static const ble_uuid128_t s_info_uuid   = SYNC_UUID(0x02);
 static const ble_uuid128_t s_ctrl_uuid   = SYNC_UUID(0x03);
 static const ble_uuid128_t s_status_uuid = SYNC_UUID(0x04);
 static const ble_uuid128_t s_creds_uuid  = SYNC_UUID(0x05);   // WIFI_CREDS (WRITE)
+static const ble_uuid128_t s_time_uuid   = SYNC_UUID(0x06);   // TIME (WRITE, epoch ms)
 
 // --- control opcodes ----------------------------------------------------------
 #define OP_START_SOFTAP   0x11    // START_SYNC in the app contract
@@ -166,6 +167,26 @@ static int creds_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt 
     return 0;
 }
 
+// TIME: the phone writes 8 bytes = little-endian int64 UTC epoch milliseconds. Lets
+// the device set its clock over BLE (no WiFi/SNTP needed) so the watchface + MCAP
+// timestamps are correct in BLE mode. Rejected if not exactly 8 bytes or pre-2023.
+static int time_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)ch; (void)attr; (void)arg;
+    uint8_t buf[8];
+    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len != sizeof(buf)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    os_mbuf_copydata(ctxt->om, 0, sizeof(buf), buf);
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v |= (uint64_t)buf[i] << (8 * i);   // little-endian
+    if (!time_set_unix_ms((int64_t)v)) {
+        ESP_LOGW(TAG, "TIME: rejected %llu ms", (unsigned long long)v);
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    ESP_LOGI(TAG, "TIME set from BLE: %llu ms", (unsigned long long)v);
+    return 0;
+}
+
 // Notify the phone with the provisioning result of its last WIFI_CREDS write.
 void blesync_notify_prov_result(bool ok, const char *err)
 {
@@ -192,6 +213,8 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
             { .uuid = &s_ctrl_uuid.u,   .access_cb = ctrl_access,
               .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN },
             { .uuid = &s_creds_uuid.u,  .access_cb = creds_access,
+              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN },
+            { .uuid = &s_time_uuid.u,   .access_cb = time_access,
               .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN },
             { .uuid = &s_status_uuid.u, .access_cb = status_access, .flags = BLE_GATT_CHR_F_NOTIFY,
               .val_handle = &s_status_val_handle },

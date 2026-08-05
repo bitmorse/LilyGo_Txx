@@ -37,3 +37,7 @@ const char *provisioning_service_name(void);   // device id "T10_XXXXXX"
 // --- wall-clock time (SNTP once WiFi is up) ---
 bool     time_is_synced(void);   // true once NTP has set the RTC
 uint64_t time_now_ns(void);      // UTC ns if synced, else monotonic esp_timer ns
+
+// Set the wall clock from phone-supplied UTC epoch milliseconds (BLE time-sync,
+// no WiFi needed). Rejects times before 2023. Returns true on success.
+bool     time_set_unix_ms(int64_t ms);
