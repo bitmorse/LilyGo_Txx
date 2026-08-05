@@ -40,10 +40,11 @@ static const ble_uuid128_t s_status_uuid = SYNC_UUID(0x04);
 static const ble_uuid128_t s_creds_uuid  = SYNC_UUID(0x05);   // WIFI_CREDS (WRITE)
 
 // --- control opcodes ----------------------------------------------------------
-#define OP_START_SOFTAP   0x11
-#define OP_STOP_WIFI      0x12
+#define OP_START_SOFTAP   0x11    // START_SYNC in the app contract
+#define OP_STOP_WIFI      0x12    // STOP_SYNC
 #define OP_SET_MODE_WLAN  0x13
 #define OP_SET_MODE_BLE   0x14
+#define OP_FORGET_WIFI    0x15
 #define OP_UNPAIR         0x16
 
 // --- state --------------------------------------------------------------------
@@ -133,6 +134,7 @@ static int ctrl_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *
     case OP_STOP_WIFI:     netmgr_request_stop_softap(); break;
     case OP_SET_MODE_WLAN: netmgr_request_set_mode(true);  break;
     case OP_SET_MODE_BLE:  netmgr_request_set_mode(false); break;
+    case OP_FORGET_WIFI:   netmgr_request_forget_wifi(); break;
     case OP_UNPAIR:        ble_store_clear(); ESP_LOGI(TAG, "unpaired (bonds cleared)"); break;
     default: break;
     }

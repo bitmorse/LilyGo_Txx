@@ -4,6 +4,11 @@ Everything the phone app needs to add a device, provision WiFi, sync files, and
 switch connectivity — all over one BLE GATT service (`blesync`). Companion to
 `docs/DEVICE_STATE.md` (device behavior) and `docs/DEVICE_FILE_SYNC.md` (HTTP API).
 
+> **This document is the authoritative wire format** (opcode bytes, characteristic
+> UUIDs, JSON field names). `DEVICE_STATE.md` describes device *behavior*; where the
+> two differ on the bytes/JSON on the wire, this file wins. The app should still parse
+> JSON **defensively** (ignore unknown fields; tolerate missing optional ones).
+
 ## GATT service
 
 Base UUID `6F4300xx-A1B2-4C3D-9E5F-0123456789AB` (byte `xx` selects the characteristic):
@@ -27,6 +32,7 @@ Subscribe to **Status** (`04`) right after connecting — it carries all async r
 | `0x12` | STOP_SYNC | end the session → device returns to idle |
 | `0x13` | SET_MODE_WLAN | prefer WiFi (join home network) |
 | `0x14` | SET_MODE_BLE | prefer BLE (WiFi off, sync over BLE/SoftAP) |
+| `0x15` | FORGET_WIFI | erase stored credentials → device returns to sync-idle |
 | `0x16` | UNPAIR | clear this device's bond ("remove device") |
 
 ### Status / Info JSON

@@ -135,22 +135,27 @@ command (over whichever transport is live), or auto-fallback. All live, no reboo
 
 ## BLE GATT contract (extends the existing `blesync` service)
 
-Service `6F430001-…`. Existing: info `…0002` (READ), control `…0003` (WRITE), status
-`…0004` (NOTIFY handoff). Additions:
+**`docs/APP_BLE_CONTRACT.md` is the authoritative wire format**; this section describes
+intent. Service `6F430001-…`: info `…0002` (READ), control `…0003` (WRITE), status
+`…0004` (NOTIFY), WIFI_CREDS `…0005` (WRITE).
 
 - **Bonding/security** — NimBLE SM with **passkey display** (`io_cap=DISPLAY_ONLY`,
-  `mitm=1`, `bonding=1`); 6-digit code on the TFT. Control + creds characteristics
-  require encryption. **paired == a bond exists.** On bond, mint a **per-bond WLAN
-  token** and return it over the status characteristic (used by the HTTP server on both
-  SoftAP and STA/LAN).
-- **`…0005` WIFI_CREDS** (WRITE, encrypted) — SSID + passphrase (TLV/JSON). On write:
-  store as *candidate* → OP_VERIFYING; commit + `provisioned` only on confirmed GOT_IP
-  (see verification above). Replaces `wifi_prov_mgr`.
-- **Control `…0003` opcodes** (extend): `START_SOFTAP`(0x11), `STOP_WIFI`(0x12),
-  `SET_MODE_WLAN`(0x13), `SET_MODE_BLE`(0x14), `FORGET_WIFI`(0x15), `UNPAIR`(0x16).
-- **Status `…0004`** (extend NOTIFY) — device snapshot JSON:
-  `{paired, provisioned, mode, op_state, sta_ip, wlan_token,
-    softap:{ssid,pass,ip,port,token}, prov_error?}`.
+  `mitm=1`, `bonding=1`); 6-digit code on the TFT. Control + WIFI_CREDS characteristics
+  require an authenticated (bonded) link. **paired == a bond exists.** The HTTP session
+  **token** is minted fresh per sync session and delivered in the handoff (not a
+  persistent per-bond secret — every session starts with a BLE handoff that carries it).
+- **`…0005` WIFI_CREDS** (WRITE, authenticated) — payload `<ssid>\0<pass>` (NUL-
+  separated bytes). On write: store as *candidate* → VERIFYING; commit + `provisioned`
+  only on confirmed GOT_IP. Replaces `wifi_prov_mgr`.
+- **Control `…0003` opcodes**: `START_SYNC`(0x11), `STOP_SYNC`(0x12), `SET_MODE_WLAN`
+  (0x13), `SET_MODE_BLE`(0x14), `FORGET_WIFI`(0x15), `UNPAIR`(0x16).
+- **Status `…0004`** (NOTIFY) carries three distinct event shapes (the app
+  distinguishes by keys). **Wire format is defined by `docs/APP_BLE_CONTRACT.md`**:
+  - state snapshot: `{state, provisioned, paired, mode, ip, dev}` (flat; also the
+    Info `…0002` READ value)
+  - provisioning result: `{prov:"ok"}` / `{prov:"fail", err}`
+  - handoff (a separate event, NOT nested in the snapshot):
+    `{mode:"softap", ssid, pass, ip, port, token}` or `{mode:"wlan", ip, port, token}`
 
 App side (octanis-connect, not the Espressif app): bond to "add device"; write
 `WIFI_CREDS` to provision; `SET_MODE_*` to switch; read status for the current state.
