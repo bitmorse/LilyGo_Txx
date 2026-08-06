@@ -153,9 +153,12 @@ code disagree, the code is a bug — fix the code, not the meaning.
 - **§5.2 softap** — a hotspot transfer is in progress; BLE **down** (§3.2).
 - **§5.3 wlan-serve** — an external-Wi-Fi transfer is in progress; BLE **down** (§3.2).
 - **§5.4 verifying** — briefly joined to test creds, then back to §5.1 (§4.3).
-> Implementation note: the current netmgr still has a **persistent** `sta-connected`
-> state (device stays joined). The agreed target (§2.3) is ephemeral external Wi-Fi —
-> aligning netmgr to that is tracked, not yet done.
+- **§5.5 sta-connecting / sta-connected** — **transient only**: entered on demand (a sync
+  join, or a feature Wi-Fi hold), never a resting state. Returns to §5.1 when the use ends.
+> Implementation note: external Wi-Fi sync is now **ephemeral** (join → serve → leave;
+> netmgr Stage A). The device never rests on Wi-Fi. **Pending (Stage B):** the internet
+> features (ZRH Traffic, Radio) need an on-demand Wi-Fi *hold* (join while open, BLE stays
+> up per §1.3, leave on close) — until then they have no connectivity in the new model.
 
 ### §6 Words to avoid
 - ❌ "BLE is always on/available" → ✅ "BLE is up except during an active transfer (§3.2)".

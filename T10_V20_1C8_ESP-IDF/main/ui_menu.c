@@ -850,7 +850,6 @@ static const char *state_word(net_state_t s, uint32_t *color)
     case NET_WLAN_SERVE:    *color = 0x37C8B4; return "Serving";
     case NET_STA_CONNECTING:*color = 0xE0A030; return "Connecting";
     case NET_VERIFYING:     *color = 0xE0A030; return "Verifying";
-    case NET_STA_FAILED:    *color = 0xE64A4A; return "WiFi failed";
     case NET_SYNC_IDLE:     *color = 0x8A93A0; return "Idle";
     default:                *color = 0x8A93A0; return "Booting";
     }
