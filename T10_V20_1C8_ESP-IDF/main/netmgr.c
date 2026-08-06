@@ -61,6 +61,15 @@ static void get_sta_ip(char *out, int cap)
 
 net_state_t netmgr_state(void) { return s_state; }
 
+// Why a file sync would be refused right now, or "none". A recording (SD single-writer)
+// or the radio stream (heap) blocks it -- orthogonal to the connectivity state.
+static const char *busy_reason(void)
+{
+    if (viblog_is_running() || uartrx_is_recording()) return "recording";
+    if (radio_is_playing())                           return "radio";
+    return "none";
+}
+
 const char *netmgr_state_str(net_state_t s)
 {
     switch (s) {
@@ -82,12 +91,12 @@ int netmgr_status_json(char *out, int cap)
     get_sta_ip(ip, sizeof(ip));
     return snprintf(out, cap,
         "{\"state\":\"%s\",\"provisioned\":%s,\"paired\":%s,\"mode\":\"%s\","
-        "\"ip\":\"%s\",\"dev\":\"%s\"}",
+        "\"ip\":\"%s\",\"dev\":\"%s\",\"busy\":\"%s\"}",
         netmgr_state_str(s_state),
         provisioning_has_creds() ? "true" : "false",
         blesync_is_paired()      ? "true" : "false",
         settings_wlan_mode()     ? "wlan" : "ble",
-        ip, provisioning_service_name());
+        ip, provisioning_service_name(), busy_reason());
 }
 
 static void post(msg_t m)
@@ -258,15 +267,14 @@ static void abort_join(const char *why)
 static void handle(msg_t m)
 {
     switch (m) {
-    case MSG_SOFTAP_START:
+    case MSG_SOFTAP_START: {
         // One SD writer at a time (recording), and don't start the heap-heavy file
-        // server while the radio stream is eating RAM -- both would OOM (§1.1).
-        if (viblog_is_running() || uartrx_is_recording()) {
-            ESP_LOGW(TAG, "SD busy (recording) -> refusing sync");
-            break;
-        }
-        if (radio_is_playing()) {
-            ESP_LOGW(TAG, "radio playing (heap) -> refusing sync");
+        // server while the radio stream is eating RAM -- both would OOM (§1.1). Tell the
+        // phone WHY (over BLE, which is still up) so it doesn't just time out on handoff.
+        const char *busy = busy_reason();
+        if (strcmp(busy, "none") != 0) {
+            ESP_LOGW(TAG, "busy (%s) -> refusing sync", busy);
+            blesync_notify_sync_busy(busy);
             break;
         }
         if (s_state == NET_STA_CONNECTED && settings_wlan_mode()) {
@@ -281,6 +289,7 @@ static void handle(msg_t m)
             enter_softap();                     // hotspot (default, §2.2)
         }
         break;
+    }
 
     case MSG_SOFTAP_STOP:
         if      (s_state == NET_SOFTAP)     exit_softap();

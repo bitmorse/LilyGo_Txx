@@ -600,29 +600,52 @@ static void filesync_cb(lv_event_t *e)
 
 // --- Settings ---------------------------------------------------------------
 
-static lv_obj_t *s_bootsnd_lbl;
-static lv_obj_t *s_mode_lbl;
+// A settings toggle row: label (left) + an LVGL switch (right). The switch is the
+// encoder focus stop -- rotate to it, press to toggle. `cb` receives
+// LV_EVENT_VALUE_CHANGED with the switch as target. Returns the switch.
+static lv_obj_t *settings_switch(lv_obj_t *page, const char *text, bool on,
+                                 bool enabled, lv_event_cb_t cb)
+{
+    lv_obj_t *row = lv_obj_create(page);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_flex_grow(lbl, 1);
+
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_size(sw, 40, 20);
+    if (on)       lv_obj_add_state(sw, LV_STATE_CHECKED);
+    if (!enabled) lv_obj_add_state(sw, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_flag(sw, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_group_add_obj(lvgl_port_group(), sw);
+    return sw;
+}
 
 static void boot_sound_cb(lv_event_t *e)
 {
-    (void)e;
-    bool on = !settings_boot_sound();
-    settings_set_boot_sound(on);
-    if (s_bootsnd_lbl)
-        lv_label_set_text_fmt(s_bootsnd_lbl, "Boot sound: %s", on ? "ON" : "OFF");
+    settings_set_boot_sound(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
-// "Use external WiFi only": OFF = Hotspot (Bluetooth stays on; transfers via a brief
-// device hotspot). ON = join home/office WiFi to transfer (phone must be on the same
-// network; Bluetooth is off during a sync). Greyed with no creds -- see settings_cb.
+// "Ext WiFi only" switch: OFF = Hotspot (Bluetooth stays on; transfers via a brief
+// device hotspot). ON = external WiFi (device joins home/office WiFi for the transfer;
+// phone on the same network; Bluetooth off during the sync). Disabled without creds.
 static void mode_cb(lv_event_t *e)
 {
-    (void)e;
-    if (!provisioning_has_creds()) return;       // greyed: can't use ext WiFi without creds
-    bool ext = !settings_wlan_mode();
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool ext = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (!provisioning_has_creds()) {             // guard (switch is disabled anyway)
+        if (ext) lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        return;
+    }
     netmgr_request_set_mode(ext);
-    if (s_mode_lbl)
-        lv_label_set_text_fmt(s_mode_lbl, "Ext WiFi only: %s", ext ? "ON" : "OFF");
 }
 
 // Factory reset from the UI: same effect as holding ENTER+DOWN 5 s -- wipe ALL NVS
@@ -654,28 +677,12 @@ static void settings_cb(lv_event_t *e)
     lv_obj_set_scroll_dir(page, LV_DIR_VER);
     s_factory_armed = false;             // fresh page -> never enter pre-armed
 
-    lv_obj_t *b = lv_button_create(page);          // toggle button (press to flip)
-    lv_obj_set_width(b, lv_pct(100));
-    s_bootsnd_lbl = lv_label_create(b);
-    lv_label_set_text_fmt(s_bootsnd_lbl, "Boot sound: %s",
-                          settings_boot_sound() ? "ON" : "OFF");
-    lv_obj_center(s_bootsnd_lbl);
-    lv_obj_add_event_cb(b, boot_sound_cb, LV_EVENT_CLICKED, NULL);
-    page_focus_stop(b);
+    lv_obj_t *first = settings_switch(page, "Boot sound", settings_boot_sound(),
+                                      true, boot_sound_cb);
 
     bool has_creds = provisioning_has_creds();
-    lv_obj_t *mb = lv_button_create(page);         // "Use external WiFi only" toggle
-    lv_obj_set_width(mb, lv_pct(100));
-    s_mode_lbl = lv_label_create(mb);
-    if (has_creds)
-        lv_label_set_text_fmt(s_mode_lbl, "Ext WiFi only: %s",
-                              settings_wlan_mode() ? "ON" : "OFF");
-    else
-        lv_label_set_text(s_mode_lbl, "Ext WiFi only\n(add WiFi first)");
-    lv_obj_center(s_mode_lbl);
-    lv_obj_add_event_cb(mb, mode_cb, LV_EVENT_CLICKED, NULL);
-    if (!has_creds) lv_obj_add_state(mb, LV_STATE_DISABLED);   // greyed; mode_cb no-ops
-    page_focus_stop(mb);
+    settings_switch(page, "Ext WiFi only", has_creds && settings_wlan_mode(),
+                    has_creds, mode_cb);
 
     // Hint: what the two transfer modes mean.
     lv_obj_t *hint = page_text(page,
@@ -685,6 +692,10 @@ static void settings_cb(lv_event_t *e)
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x8A93A0), 0);
 
+    // Forget WiFi (moved here from the home menu). Greyed with no creds.
+    lv_obj_t *fw = page_button(page, "Forget WiFi", repair_cb);
+    if (!has_creds) lv_obj_add_state(fw, LV_STATE_DISABLED);
+
     lv_obj_t *fb = lv_button_create(page);         // factory reset (two-press confirm)
     lv_obj_set_width(fb, lv_pct(100));
     s_factory_lbl = lv_label_create(fb);
@@ -693,10 +704,9 @@ static void settings_cb(lv_event_t *e)
     lv_obj_add_event_cb(fb, factory_reset_cb, LV_EVENT_CLICKED, NULL);
     page_focus_stop(fb);
 
-    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
+    page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
     lv_screen_load(page);
-    lv_group_focus_obj(b);
-    (void)back;
+    lv_group_focus_obj(first);
 }
 
 static void reboot_cb(lv_event_t *e)
@@ -994,7 +1004,6 @@ static void build_app_list(void)
     make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
     make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
     make_button(scr, "Settings " LV_SYMBOL_RIGHT, settings_cb);
-    make_button(scr, "Forget WiFi", repair_cb);
     make_button(scr, "Reboot", reboot_cb);
 }
 

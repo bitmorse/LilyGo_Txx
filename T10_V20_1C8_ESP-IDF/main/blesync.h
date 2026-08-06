@@ -33,6 +33,9 @@ void blesync_notify_wlan_handoff(const char *ip, int port, const char *token);
 // calls this after verification succeeds/fails).
 void blesync_notify_prov_result(bool ok, const char *err);
 
+// Tell the phone a START_SYNC was refused because the device is busy ("recording"|"radio").
+void blesync_notify_sync_busy(const char *reason);
+
 // Push the full device-state snapshot to the connected phone (netmgr calls this on
 // state transitions).
 void blesync_notify_status(void);

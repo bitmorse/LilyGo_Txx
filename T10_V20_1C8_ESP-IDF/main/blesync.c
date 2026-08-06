@@ -187,6 +187,20 @@ static int time_access(uint16_t ch, uint16_t attr, struct ble_gatt_access_ctxt *
     return 0;
 }
 
+// Notify the phone that a START_SYNC was refused because the device is busy, and why
+// ("recording" | "radio"). Lets the app show "device busy" instead of a bare handoff
+// timeout. BLE is up here (the START_SYNC arrived over it), so this always reaches the phone.
+void blesync_notify_sync_busy(const char *reason)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    char json[96];
+    int n = snprintf(json, sizeof(json), "{\"sync\":\"busy\",\"reason\":\"%s\"}",
+                     reason ? reason : "");
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(json, n);
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_status_val_handle, om);
+    ESP_LOGI(TAG, "sync busy: %s", reason ? reason : "");
+}
+
 // Notify the phone with the provisioning result of its last WIFI_CREDS write.
 void blesync_notify_prov_result(bool ok, const char *err)
 {

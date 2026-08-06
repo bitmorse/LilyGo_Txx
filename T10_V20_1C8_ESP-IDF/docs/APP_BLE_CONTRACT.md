@@ -40,14 +40,19 @@ Subscribe to **Status** (`04`) right after connecting — it carries all async r
 
 **Info (`02`) read** and **Status (`04`) state pushes** — the device snapshot:
 ```json
-{"state":"sta-connected","provisioned":true,"paired":true,
- "mode":"wlan","ip":"192.168.1.42","dev":"T10_88F199"}
+{"state":"sync-idle","provisioned":true,"paired":true,
+ "mode":"ble","ip":"0.0.0.0","dev":"T10_88F199","busy":"none"}
 ```
-`state` ∈ `sync-idle | sta-connecting | sta-connected | sta-failed | verifying |
-softap | wlan-serve`. `mode` ∈ `wlan | ble`.
+`state` ∈ `sync-idle | sta-connecting | sta-connected | verifying | softap | wlan-serve`.
+`mode` ∈ `wlan | ble` (display as **External WiFi** / **Hotspot**). `busy` ∈ `none |
+recording | radio` — while non-`none` a file sync is refused (device recording to SD, or
+streaming radio); grey out Sync and show why. The device rests on BLE (`sync-idle`) and
+joins WiFi only on demand, so `sta-*` states are transient, not a resting mode.
 
 **Status (`04`) async events** (distinguish by keys):
 - provisioning result: `{"prov":"ok"}` or `{"prov":"fail","err":"…"}`
+- sync refused (device busy): `{"sync":"busy","reason":"recording"|"radio"}` — sent in
+  response to START_SYNC instead of a handoff; show "device busy, try again shortly."
 - SoftAP handoff: `{"mode":"softap","ssid":"Octanis-XXXX","pass":"…","ip":"192.168.4.1","port":8080,"token":"…"}`
 - WLAN handoff: `{"mode":"wlan","ip":"192.168.1.42","port":8080,"token":"…"}`
 
