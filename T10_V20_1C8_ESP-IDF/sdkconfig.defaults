@@ -93,3 +93,9 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=24
 
 # Persist BLE bonds (pairings) across reboots.
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# Brownout detector disabled: this board browns out (Vdd < 2.43V, already the
+# lowest threshold) when the class-D audio amp drives the speaker. The dip is a
+# benign transient (no flash writes during playback), so disable the detector to
+# stop it resetting mid-clip. See main/audio.c.
+CONFIG_ESP_BROWNOUT_DET=n
