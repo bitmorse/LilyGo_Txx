@@ -271,12 +271,24 @@ static void handle(msg_t m)
 
     case MSG_STA_GOT_IP:
         if (s_state == NET_VERIFYING) {
-            blesync_notify_prov_result(true, NULL);      // provisioned + connected
-            ESP_LOGI(TAG, "verified -> provisioned");
-        }
-        if (s_state == NET_VERIFYING || s_state == NET_STA_CONNECTING ||
-            s_state == NET_STA_FAILED) {
-            s_state = NET_STA_CONNECTED;
+            // Creds verified (already stored). Tell the phone. Hotspot is the default,
+            // so DROP back to sync-idle (BLE) unless the user has explicitly enabled
+            // External WiFi only -- adding/verifying WiFi is not a request to switch to it.
+            blesync_notify_prov_result(true, NULL);
+            provisioning_start_sntp();                   // grab time while briefly online
+            if (settings_wlan_mode()) {
+                s_state = NET_STA_CONNECTED;             // ext-WiFi mode -> stay connected
+                s_sta_retries = 0;
+                provisioning_set_connected(true);
+                ESP_LOGI(TAG, "verified -> sta-connected (ext WiFi mode)");
+            } else {
+                provisioning_sta_disconnect();           // hotspot default -> back to BLE
+                enter_sync();
+                ESP_LOGI(TAG, "verified -> back to hotspot (BLE)");
+            }
+            blesync_notify_status();
+        } else if (s_state == NET_STA_CONNECTING || s_state == NET_STA_FAILED) {
+            s_state = NET_STA_CONNECTED;                 // user-requested ext WiFi connect
             s_sta_retries = 0;
             provisioning_set_connected(true);
             provisioning_start_sntp();

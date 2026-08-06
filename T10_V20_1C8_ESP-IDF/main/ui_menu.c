@@ -278,32 +278,6 @@ static void repair_cb(lv_event_t *e)
     netmgr_request_forget_wifi();        // erase creds -> sync-idle (live, no reboot)
 }
 
-// WiFi is provisioned by the phone app over BLE (it writes the WIFI_CREDS
-// characteristic) -- no on-device pairing flow. This page just shows status.
-static void wifi_setup_cb(lv_event_t *e)
-{
-    (void)e;
-    net_state_t st = netmgr_state();
-    lv_obj_t *page = page_shell("WiFi Setup");
-
-    if (st == NET_STA_CONNECTED) {
-        char ssid[33];
-        provisioning_ssid(ssid, sizeof(ssid));
-        lv_label_set_text_fmt(page_text(page, ""),
-            "Connected:\n%s\n\nUse Forget WiFi to\nchange network.", ssid);
-    } else if (st == NET_VERIFYING) {
-        page_text(page, "Checking WiFi\ncredentials...");
-    } else {
-        lv_label_set_text_fmt(page_text(page, ""),
-            "No WiFi.\n\nAdd it from the app\n(device: %s).",
-            provisioning_service_name());
-    }
-
-    lv_obj_t *back = page_button(page, LV_SYMBOL_LEFT " Back", back_cb);
-    lv_screen_load(page);
-    lv_group_focus_obj(back);
-}
-
 // --- ZRH airport traffic: hourly bars, Today vs Usual ----------------------
 
 static int                s_air_gen;        // invalidated when leaving the page
@@ -888,8 +862,10 @@ static void status_bar_update(void)
     if (!s_state_lbl) return;
     uint32_t c;
     const char *w = state_word(netmgr_state(), &c);
+    // Mode suffix = the resting transport preference. Default is BLE (§3.1); "Hotspot"
+    // is ephemeral and only shows transiently as the STATE word during a sync (§2.2).
     lv_label_set_text_fmt(s_state_lbl, "%s  %s%s", w,
-                          settings_wlan_mode() ? "Ext WiFi" : "Hotspot",
+                          settings_wlan_mode() ? "Ext WiFi" : "BLE",
                           blesync_is_paired() ? "  " LV_SYMBOL_OK : "");
     lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(c), 0);
 }
@@ -1015,7 +991,6 @@ static void build_app_list(void)
     make_button(scr, "File Sync " LV_SYMBOL_RIGHT, filesync_cb);
     make_button(scr, "WiFi scan " LV_SYMBOL_RIGHT, wifi_scan_cb);
     make_button(scr, "Board info " LV_SYMBOL_RIGHT, board_info_cb);
-    make_button(scr, "Setup WiFi " LV_SYMBOL_RIGHT, wifi_setup_cb);
     make_button(scr, "Settings " LV_SYMBOL_RIGHT, settings_cb);
     make_button(scr, "Forget WiFi", repair_cb);
     make_button(scr, "Reboot", reboot_cb);

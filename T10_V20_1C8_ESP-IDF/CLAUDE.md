@@ -99,3 +99,66 @@ Modules added for vibration logging — `imu.c` (hi-rate FIFO), `sdcard.c`,
   Uses the one accepted `goto fail`.
 - Known hardware risks (I²C 1 MHz margin, no MPU INT pin, consumer-grade IMU
   bandwidth) are documented in `docs/HARDWARE.md`, not hidden.
+
+## Connectivity vocabulary & rules (§)
+
+Canonical definitions so we stop confusing terms. Cite the code, e.g. "§3.2", in
+commits/comments/PRs when the behaviour is load-bearing. When the words below and the
+code disagree, the code is a bug — fix the code, not the meaning.
+
+### §1 The RAM constraint (why any of this exists)
+- **§1.1** ESP32-D0WD, **no PSRAM**, ~320 KB RAM, tight heap.
+- **§1.2** *(governing rule)* **BLE and the HTTP file server cannot run at the same
+  time.** NimBLE (~40–48 KB) + the file server (httpd + mDNS + sha256 precache + FATFS/SD)
+  leaves ~0 free → LWIP can't get TX buffers → transfers stall. Measured min-free 44–136 B.
+- **§1.3** BLE **and Wi-Fi alone DO coexist** (~50 KB free with STA connected; SoftAP up
+  is tighter but fine for a brief handoff). The incompatibility in §1.2 is BLE **+ the
+  file server**, *not* BLE + Wi-Fi. Say it precisely: we offload BLE **while serving
+  files**, not "while using Wi-Fi".
+
+### §2 Transports (nouns — use these exact words)
+- **§2.1 BLE** — the **default, resting transport** and control channel. A file sync can
+  only be *started* over BLE (§3.3).
+- **§2.2 Hotspot** — the device's own SoftAP. **Ephemeral: it exists only for the duration
+  of one file-sync transfer**, then closes. Never a resting state. ("Hotspot mode" = the
+  device *would* use its hotspot for the next sync.)
+- **§2.3 External Wi-Fi** — the device joins a home/office network to serve files over the
+  LAN. **Also ephemeral per the agreed model**: joined only for the transfer (see §5 note).
+- **§2.4 File server** — the httpd instance (`filesrv.c`). The RAM-heavy thing from §1.2.
+  "Serving / transfer in progress" = the file server is running.
+
+### §3 BLE availability (the rule I keep getting wrong)
+- **§3.1** BLE is up in **every resting state** (`sync-idle`, and while merely connected to
+  Wi-Fi). It is **NOT "always available".**
+- **§3.2** BLE is **torn down (`blesync_stop`) only for the duration of an active file
+  transfer** — i.e. in the serving states `softap` / `wlan-serve` — and **restored
+  (`blesync_start`) when the transfer ends**. This is the *only* time BLE is unavailable.
+- **§3.3** **BLE is required to start a sync.** The phone writes the Control characteristic
+  over BLE; netmgr then opens the hotspot / joins external Wi-Fi, hands off, and *then*
+  drops BLE per §3.2.
+
+### §4 Default & mode policy
+- **§4.1** Default is **BLE**. The device **never auto-joins external Wi-Fi**, even with
+  stored creds (`settings_wlan_mode()` defaults false).
+- **§4.2** **External Wi-Fi is opt-in**, per the "Ext WiFi only" setting; greyed until
+  creds exist.
+- **§4.3** Adding Wi-Fi **verifies then returns to BLE** — storing creds is not a request
+  to switch transports.
+- **§4.4** Forgetting Wi-Fi resets the preference to the BLE default (§4.1).
+
+### §5 States (`netmgr.c` — the source of truth for behaviour)
+`boot → sync-idle → (softap ⇄ back) ` and, when external Wi-Fi is used,
+`sync-idle → verifying/sta → wlan-serve → back`.
+- **§5.1 sync-idle** — resting; BLE up; no file server. The default (§4.1).
+- **§5.2 softap** — a hotspot transfer is in progress; BLE **down** (§3.2).
+- **§5.3 wlan-serve** — an external-Wi-Fi transfer is in progress; BLE **down** (§3.2).
+- **§5.4 verifying** — briefly joined to test creds, then back to §5.1 (§4.3).
+> Implementation note: the current netmgr still has a **persistent** `sta-connected`
+> state (device stays joined). The agreed target (§2.3) is ephemeral external Wi-Fi —
+> aligning netmgr to that is tracked, not yet done.
+
+### §6 Words to avoid
+- ❌ "BLE is always on/available" → ✅ "BLE is up except during an active transfer (§3.2)".
+- ❌ "we can't run BLE and Wi-Fi together" → ✅ "we can't run BLE and the **file server**
+  together (§1.2)".
+- ❌ "Hotspot mode" as a resting state → ✅ hotspot is ephemeral, sync-only (§2.2).
