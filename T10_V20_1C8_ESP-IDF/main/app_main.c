@@ -23,7 +23,6 @@
 #include "buttons.h"
 #include "provisioning.h"
 #include "netmgr.h"
-#include "power.h"
 #include "sound.h"
 #include "imu.h"
 #include "lvgl_port.h"
@@ -41,7 +40,6 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "LilyGO TTGO T10 V2.0 - ESP-IDF test firmware booting");
 
-    power_init();          // best-effort IP5306 keep-on (battery use)
     st7735_init();
     buttons_init();
     sound_init();

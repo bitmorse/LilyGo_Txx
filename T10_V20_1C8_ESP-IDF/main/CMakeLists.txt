@@ -4,7 +4,6 @@ idf_component_register(
         "st7735.c"
         "buttons.c"
         "wifi_scan.c"
-        "power.c"
         "sound.c"
         "i2c_bus.c"
         "imu.c"
