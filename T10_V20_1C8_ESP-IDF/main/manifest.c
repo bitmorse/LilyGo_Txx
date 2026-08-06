@@ -48,9 +48,18 @@ static SemaphoreHandle_t s_lock;
 // instead of contending with sha256 hashing.
 static volatile bool s_precache_hold;
 
+// Cached directory scan (this SD card is ~0.3 s per stat, so re-scanning per request
+// is too slow). Valid for a whole serving session: files don't change mid-session
+// (recording is refused while serving), only a delete mutates them -- which
+// invalidates it. Held under s_lock like s_files. -1 = invalid, must re-scan.
+static int s_scan_n = -1;
+
+static void scan_invalidate(void) { s_scan_n = -1; }
+
 void manifest_init(void)
 {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();   // idempotent
+    s_scan_n = -1;                                    // fresh session -> re-scan once
 }
 
 void manifest_precache_hold(bool hold) { s_precache_hold = hold; }
@@ -78,8 +87,12 @@ static int cmp_name(const void *a, const void *b)
 }
 
 // Scan /sdcard into a sorted (by name) list of regular files. Returns the count.
+// Result is cached in s_files (see s_scan_n): callers all pass s_files, so a valid
+// cache is reused instead of re-hitting the slow SD. Call under s_lock.
 static int scan(entry_t *list, int max)
 {
+    if (list == s_files && s_scan_n >= 0) return s_scan_n;   // cached this session
+
     DIR *d = opendir(MOUNT);
     if (!d) { ESP_LOGW(TAG, "opendir(%s) failed", MOUNT); return 0; }
 
@@ -105,6 +118,7 @@ static int scan(entry_t *list, int max)
         ESP_LOGW(TAG, "manifest capped at %d files; extra .mcap files hidden", max);
     closedir(d);
     qsort(list, n, sizeof(entry_t), cmp_name);          // stable id ordering
+    if (list == s_files) s_scan_n = n;                  // cache for the session
     return n;
 }
 
@@ -215,23 +229,22 @@ int manifest_stream_json(manifest_sink_fn sink, void *ctx)
     if (h < 0 || h >= (int)sizeof(hdr)) { unlock(); return -1; }
     rc = emit(sink, ctx, buf, sizeof(buf), &len, hdr, h);
 
+    // NOTE: the manifest deliberately omits sha256 -- reading a .s256 sidecar per file
+    // was ~1.6 s/file on this SD card (25 s for a dozen files -> the app's 10 s timeout).
+    // The app verifies integrity from the /file ETag (which the device sets from the
+    // sidecar, one read at download time) instead. Keeps /manifest cheap + scalable.
     for (int i = 0; i < n && rc == 0; i++) {
-        char hex[65] = {0};
-        bool have_hash = sha256_read_sidecar(s_files[i].name, hex);  // fast; no compute
-
         char iso[24];
         struct tm tmv;
         gmtime_r(&s_files[i].mtime, &tmv);
         strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tmv);
 
-        char ent[288];                            // one entry needs at most ~200 B
+        char ent[288];                            // one entry needs at most ~160 B
         int m = snprintf(ent, sizeof(ent),
             "%s{\"id\":%d,\"name\":\"%s\",\"mime\":\"%s\",\"bytes\":%ld,"
-            "\"created_at\":\"%s\"%s%s%s}",
+            "\"created_at\":\"%s\"}",
             i ? "," : "", i, s_files[i].name, mime_for(s_files[i].name),
-            s_files[i].size, iso,
-            have_hash ? ",\"sha256\":\"" : "", have_hash ? hex : "",
-            have_hash ? "\"" : "");
+            s_files[i].size, iso);
         if (m < 0 || m >= (int)sizeof(ent)) continue;   // never expected; skip entry
         rc = emit(sink, ctx, buf, sizeof(buf), &len, ent, m);
     }
@@ -302,6 +315,7 @@ bool manifest_delete_id(int id)
         snprintf(path, sizeof(path), "%s/%s.s256", MOUNT, s_files[id].name);
         remove(path);                                    // best-effort sidecar
         ESP_LOGI(TAG, "deleted id %d (%s)", id, s_files[id].name);
+        scan_invalidate();                               // files changed -> re-scan
     }
     unlock();
     return ok;
