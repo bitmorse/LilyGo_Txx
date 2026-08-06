@@ -70,7 +70,10 @@ void audio_play(int index)
     if (index < 0 || index >= AUDIO_CLIP_COUNT) return;
     if (s_queue == NULL) {                        // lazy one-time setup
         s_queue = xQueueCreate(2, sizeof(int));
-        xTaskCreate(audio_task, "audio", 4096, NULL, 6, NULL);
+        // 8192: dac_continuous_new_channels() (I2S DMA + APLL clock setup) is a deep
+        // synchronous call chain -- 4096 overflowed and reset the chip mid-setup (no
+        // canary trip because it never context-switched). Radio's DAC task uses 8192.
+        xTaskCreate(audio_task, "audio", 8192, NULL, 6, NULL);
     }
     if (s_busy) return;                           // play once; ignore while playing
     xQueueSend(s_queue, &index, 0);
