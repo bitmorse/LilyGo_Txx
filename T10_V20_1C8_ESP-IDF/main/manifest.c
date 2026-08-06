@@ -59,7 +59,7 @@ static void scan_invalidate(void) { s_scan_n = -1; }
 void manifest_init(void)
 {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();   // idempotent
-    s_scan_n = -1;                                    // fresh session -> re-scan once
+    scan_invalidate();                               // fresh session -> re-scan once
 }
 
 void manifest_precache_hold(bool hold) { s_precache_hold = hold; }
@@ -315,7 +315,11 @@ bool manifest_delete_id(int id)
         snprintf(path, sizeof(path), "%s/%s.s256", MOUNT, s_files[id].name);
         remove(path);                                    // best-effort sidecar
         ESP_LOGI(TAG, "deleted id %d (%s)", id, s_files[id].name);
-        scan_invalidate();                               // files changed -> re-scan
+        // Update the cached scan IN PLACE rather than invalidating it -- a re-scan of
+        // this slow SD (~6 s) would make the next delete time out. Drop the entry and
+        // shift the tail down; same id renumbering a fresh scan would produce.
+        memmove(&s_files[id], &s_files[id + 1], (size_t)(n - id - 1) * sizeof(entry_t));
+        s_scan_n = n - 1;
     }
     unlock();
     return ok;
