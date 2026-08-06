@@ -4,6 +4,8 @@
 #include "uartrx_rec.h"
 #include "mcap.h"
 #include "sdcard.h"
+#include "viblog.h"                  // viblog_is_running() -- SD single-writer guard
+#include "filesrv.h"                 // filesrv_running()   -- SD single-writer guard
 #include "provisioning.h"            // time_now_ns(), time_is_synced(), service name
 
 #include <string.h>
@@ -175,6 +177,12 @@ static void rec_write_state(uartrx_state_t st)
 
 static void rec_open(void)
 {
+    // One SD writer at a time: if viblog or the file server (a sync) is using the card,
+    // keep monitoring the UART but don't record (s_fp stays NULL).
+    if (viblog_is_running() || filesrv_running()) {
+        ESP_LOGW(TAG, "SD busy (viblog / sync) -> not recording");
+        return;
+    }
     if (!sd_mount()) { ESP_LOGW(TAG, "no SD -> not recording"); return; }
     if (!next_path(s_rec_path, sizeof(s_rec_path))) return;
     s_fp = fopen(s_rec_path, "wb");

@@ -310,6 +310,10 @@ static void handle(msg_t m)
 
     case MSG_FORGET:                            // live: erase creds -> sync-idle (no reboot)
         ESP_LOGW(TAG, "forget Wi-Fi -> sync-idle");
+        // If a transfer is in progress, tear it down FIRST (stops httpd, restores BLE) --
+        // otherwise enter_sync() would restart BLE with the file server still up -> OOM.
+        if      (s_state == NET_SOFTAP)     exit_softap();
+        else if (s_state == NET_WLAN_SERVE) exit_wlan_serve();
         settings_set_wlan_mode(false);          // no creds -> back to hotspot default
         provisioning_sta_disconnect();
         provisioning_forget();
@@ -339,7 +343,14 @@ static void handle(msg_t m)
         break;
 
     case MSG_STA_DISCONNECTED:
-        if (s_state == NET_VERIFYING || s_state == NET_STA_CONNECTING) {
+        if (s_state == NET_WLAN_SERVE) {
+            // Wi-Fi dropped mid-transfer -> stop serving and return to BLE now, instead
+            // of sitting unreachable on both links until the idle watchdog fires (~5 min).
+            ESP_LOGW(TAG, "STA dropped during wlan-serve -> stop + BLE");
+            filesrv_stop();
+            provisioning_sta_disconnect();
+            enter_sync();
+        } else if (s_state == NET_VERIFYING || s_state == NET_STA_CONNECTING) {
             if (s_sta_retries++ < STA_MAX_RETRY) provisioning_sta_reconnect();
             else                                 abort_join("failed");
         } else if (s_state == NET_STA_CONNECTED) {

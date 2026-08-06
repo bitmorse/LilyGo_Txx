@@ -5,6 +5,8 @@
 #include "accel_encode.h"        // accel_encode_batch(), ACCEL_MSG_MAXLEN()
 #include "provisioning.h"        // time_now_ns(), time_is_synced()
 #include "accel_schema.h"        // accel_schema_fds[], ACCEL_SCHEMA_NAME
+#include "uartrx.h"              // uartrx_is_recording() -- SD single-writer guard
+#include "filesrv.h"             // filesrv_running()     -- SD single-writer guard
 
 #include <assert.h>
 #include <string.h>
@@ -230,6 +232,13 @@ bool viblog_start(void)
 {
     if (s_run) return true;
     s_err[0] = '\0';
+
+    // One SD writer at a time: refuse while the UART-RX recording or the file server
+    // (a sync) is using the card -- two writers on the no-PSRAM SPI card corrupt data.
+    if (uartrx_is_recording() || filesrv_running()) {
+        snprintf(s_err, sizeof(s_err), "SD busy (UART / sync)");
+        return false;
+    }
 
     if (!imu_hires_start()) {                        // needs the MPU9250
         snprintf(s_err, sizeof(s_err), "no accelerometer");
