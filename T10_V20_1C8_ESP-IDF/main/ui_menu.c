@@ -24,6 +24,7 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "nvs_flash.h"
+#include "esp_log.h"
 
 // Main menu screen + its focusable widgets, so we can restore the encoder group
 // when returning from a sub-page.
@@ -372,6 +373,10 @@ static void air_fetch_task(void *arg)
         if (ok_u == 0) fill_chart(s_chart_usual, s_ser_usual, usual_avg);
     }
     lvgl_port_unlock();
+    // Stack headroom check: this task runs a TLS handshake (mbedTLS + cert bundle) and
+    // cJSON parse, which are stack-heavy. Log the min free so the size can be tuned.
+    ESP_LOGI("air", "task stack headroom: %u bytes",
+             (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
     vTaskDelete(NULL);
 }
 
@@ -401,7 +406,9 @@ static void airport_cb(lv_event_t *e)
     lv_screen_load(page);
     lv_group_focus_obj(s_chart_today);   // start at the top; rotate down to Back
 
-    xTaskCreate(air_fetch_task, "air", 8192, (void *)(intptr_t)gen, 5, NULL);
+    // 12288: air_fetch_task runs two HTTPS fetches (mbedTLS handshake + cert-bundle
+    // verify) and a cJSON parse on this stack -- 8192 was under-provisioned (audit).
+    xTaskCreate(air_fetch_task, "air", 12288, (void *)(intptr_t)gen, 5, NULL);
 }
 
 // --- Audio clips (WAV playback via the DAC) ---------------------------------
@@ -628,15 +635,17 @@ static void boot_sound_cb(lv_event_t *e)
         lv_label_set_text_fmt(s_bootsnd_lbl, "Boot sound: %s", on ? "ON" : "OFF");
 }
 
-// Connectivity mode: WLAN (join home WiFi) vs BLE (WiFi off, sync over BLE/SoftAP).
-// Switches live via netmgr; the label reflects the new preference.
+// "Use external WiFi only": OFF = Hotspot (Bluetooth stays on; transfers via a brief
+// device hotspot). ON = join home/office WiFi to transfer (phone must be on the same
+// network; Bluetooth is off during a sync). Greyed with no creds -- see settings_cb.
 static void mode_cb(lv_event_t *e)
 {
     (void)e;
-    bool wlan = !settings_wlan_mode();
-    netmgr_request_set_mode(wlan);
+    if (!provisioning_has_creds()) return;       // greyed: can't use ext WiFi without creds
+    bool ext = !settings_wlan_mode();
+    netmgr_request_set_mode(ext);
     if (s_mode_lbl)
-        lv_label_set_text_fmt(s_mode_lbl, "Mode: %s", wlan ? "WLAN" : "BLE");
+        lv_label_set_text_fmt(s_mode_lbl, "Ext WiFi only: %s", ext ? "ON" : "OFF");
 }
 
 // Factory reset from the UI: same effect as holding ENTER+DOWN 5 s -- wipe ALL NVS
@@ -677,13 +686,27 @@ static void settings_cb(lv_event_t *e)
     lv_obj_add_event_cb(b, boot_sound_cb, LV_EVENT_CLICKED, NULL);
     page_focus_stop(b);
 
-    lv_obj_t *mb = lv_button_create(page);         // connectivity mode toggle
+    bool has_creds = provisioning_has_creds();
+    lv_obj_t *mb = lv_button_create(page);         // "Use external WiFi only" toggle
     lv_obj_set_width(mb, lv_pct(100));
     s_mode_lbl = lv_label_create(mb);
-    lv_label_set_text_fmt(s_mode_lbl, "Mode: %s", settings_wlan_mode() ? "WLAN" : "BLE");
+    if (has_creds)
+        lv_label_set_text_fmt(s_mode_lbl, "Ext WiFi only: %s",
+                              settings_wlan_mode() ? "ON" : "OFF");
+    else
+        lv_label_set_text(s_mode_lbl, "Ext WiFi only\n(add WiFi first)");
     lv_obj_center(s_mode_lbl);
     lv_obj_add_event_cb(mb, mode_cb, LV_EVENT_CLICKED, NULL);
+    if (!has_creds) lv_obj_add_state(mb, LV_STATE_DISABLED);   // greyed; mode_cb no-ops
     page_focus_stop(mb);
+
+    // Hint: what the two transfer modes mean.
+    lv_obj_t *hint = page_text(page,
+        "OFF = Hotspot: Bluetooth on; phone joins a brief device hotspot.\n"
+        "ON = External WiFi: device joins home/office WiFi; phone must be on the "
+        "same network. Bluetooth off during sync.");
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x8A93A0), 0);
 
     lv_obj_t *fb = lv_button_create(page);         // factory reset (two-press confirm)
     lv_obj_set_width(fb, lv_pct(100));
@@ -866,7 +889,7 @@ static void status_bar_update(void)
     uint32_t c;
     const char *w = state_word(netmgr_state(), &c);
     lv_label_set_text_fmt(s_state_lbl, "%s  %s%s", w,
-                          settings_wlan_mode() ? "WLAN" : "BLE",
+                          settings_wlan_mode() ? "Ext WiFi" : "Hotspot",
                           blesync_is_paired() ? "  " LV_SYMBOL_OK : "");
     lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(c), 0);
 }

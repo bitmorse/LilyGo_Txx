@@ -10,7 +10,8 @@ static const char *TAG = "settings";
 #define K_WLAN_MODE "wlan_mode"
 
 static bool s_boot_sound;      // cached; default off (quiet boot)
-static bool s_wlan_mode = true;// cached; default WLAN
+static bool s_wlan_mode = false;// cached; default HOTSPOT (BLE stays on; don't
+                               // auto-join external WiFi even if creds exist)
 
 static void save_u8(const char *key, uint8_t v)
 {
@@ -25,7 +26,7 @@ static void save_u8(const char *key, uint8_t v)
 void settings_init(void)
 {
     s_boot_sound = false;                          // defaults
-    s_wlan_mode  = true;
+    s_wlan_mode  = false;                          // default hotspot (see decl)
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
         uint8_t v = 0;

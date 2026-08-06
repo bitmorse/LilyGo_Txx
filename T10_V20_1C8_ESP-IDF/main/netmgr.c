@@ -263,6 +263,7 @@ static void handle(msg_t m)
 
     case MSG_FORGET:                             // live: erase creds -> sync-idle (no reboot)
         ESP_LOGW(TAG, "forget WiFi -> sync-idle");
+        settings_set_wlan_mode(false);           // no creds -> back to hotspot default
         provisioning_sta_disconnect();
         provisioning_forget();
         enter_sync();
