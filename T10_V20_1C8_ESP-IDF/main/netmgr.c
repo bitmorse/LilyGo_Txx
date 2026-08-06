@@ -6,6 +6,7 @@
 #include "settings.h"
 #include "viblog.h"
 #include "uartrx.h"                // uartrx_is_recording() -- SD single-writer guard
+#include "radio.h"                 // radio_is_playing() -- heap guard for a sync
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -27,6 +28,8 @@ typedef enum {
     MSG_SET_MODE,          // set the sync-transport preference (s_pend_wlan)
     MSG_STA_GOT_IP,
     MSG_STA_DISCONNECTED,
+    MSG_WIFI_ACQUIRE,      // a feature wants Wi-Fi up (on-demand hold)
+    MSG_WIFI_RELEASE,      // a feature is done with Wi-Fi
 } msg_t;
 
 #define STA_MAX_RETRY       6          // fast retries on a join drop before giving up
@@ -40,6 +43,7 @@ static net_state_t   s_state = NET_BOOT;
 static QueueHandle_t s_q;
 static int           s_sta_retries;
 static bool          s_sync_pending;       // a sync is waiting for Wi-Fi to come up (then serve)
+static int           s_wifi_users;         // on-demand Wi-Fi hold refcount (features)
 static int64_t       s_join_deadline;      // ms uptime by which a join must complete
 static char          s_pend_ssid[33], s_pend_pass[65];   // creds awaiting verification
 static bool          s_pend_wlan;          // pref requested via MSG_SET_MODE
@@ -113,6 +117,22 @@ void netmgr_post_event(net_event_t ev)
     case NETEV_STA_DISCONNECTED: post(MSG_STA_DISCONNECTED); break;
     }
 }
+
+// Called from a feature task: request Wi-Fi and block (up to timeout) until it's up.
+// The refcount is maintained on the manager task; the caller just polls the connected
+// flag. ALWAYS pair with netmgr_wifi_release(), even on a false return.
+bool netmgr_wifi_hold(unsigned timeout_ms)
+{
+    post(MSG_WIFI_ACQUIRE);
+    int64_t deadline = now_ms() + (int64_t)timeout_ms;
+    while (now_ms() < deadline) {
+        if (provisioning_is_connected()) return true;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return provisioning_is_connected();
+}
+
+void netmgr_wifi_release(void) { post(MSG_WIFI_RELEASE); }
 
 // --- transitions (all run on the manager task) ------------------------------
 // CLAUDE.md §: the device RESTS on BLE (sync-idle, §5.1). Wi-Fi is joined only on
@@ -207,8 +227,15 @@ static void enter_wlan_serve(void)
 static void exit_wlan_serve(void)
 {
     filesrv_stop();
-    provisioning_sta_disconnect();              // ephemeral: leave Wi-Fi (§2.3)
-    enter_sync();
+    if (s_wifi_users > 0) {                      // a feature still holds Wi-Fi -> keep STA
+        s_state = NET_STA_CONNECTED;
+        blesync_start();                         // bring BLE back (§3.2 restore)
+        provisioning_set_connected(true);
+        ESP_LOGI(TAG, "wlan-serve done; Wi-Fi held by a feature -> sta-connected");
+    } else {
+        provisioning_sta_disconnect();           // ephemeral: leave Wi-Fi (§2.3)
+        enter_sync();
+    }
 }
 
 // Abort an in-flight join (fail or timeout) back to BLE rest. For a verify, tell the
@@ -232,13 +259,21 @@ static void handle(msg_t m)
 {
     switch (m) {
     case MSG_SOFTAP_START:
-        // One SD writer at a time: don't raise a file server while the SD is being
-        // written (vibration log OR the UART-RX MCAP recording).
+        // One SD writer at a time (recording), and don't start the heap-heavy file
+        // server while the radio stream is eating RAM -- both would OOM (§1.1).
         if (viblog_is_running() || uartrx_is_recording()) {
             ESP_LOGW(TAG, "SD busy (recording) -> refusing sync");
             break;
         }
-        if (s_state != NET_SYNC_IDLE) break;    // only start a sync from BLE rest
+        if (radio_is_playing()) {
+            ESP_LOGW(TAG, "radio playing (heap) -> refusing sync");
+            break;
+        }
+        if (s_state == NET_STA_CONNECTED && settings_wlan_mode()) {
+            enter_wlan_serve();                 // already on Wi-Fi (a feature holds it)
+            break;
+        }
+        if (s_state != NET_SYNC_IDLE) break;    // else only start a sync from BLE rest
         if (settings_wlan_mode() && provisioning_has_creds()) {
             s_sync_pending = true;              // serve once Wi-Fi is up (ephemeral, §2.3)
             begin_join(NET_STA_CONNECTING);
@@ -298,8 +333,36 @@ static void handle(msg_t m)
         if (s_state == NET_VERIFYING || s_state == NET_STA_CONNECTING) {
             if (s_sta_retries++ < STA_MAX_RETRY) provisioning_sta_reconnect();
             else                                 abort_join("failed");
+        } else if (s_state == NET_STA_CONNECTED) {
+            provisioning_set_connected(false);
+            if (s_wifi_users > 0) {              // a feature still wants Wi-Fi -> restore
+                s_state = NET_STA_CONNECTING;
+                s_sta_retries = 0;
+                s_join_deadline = now_ms() + JOIN_TIMEOUT_MS;
+                provisioning_sta_reconnect();
+            } else {
+                enter_sync();                   // no holders (race) -> rest
+            }
         }
-        // NET_STA_CONNECTED (a held feature link) drop handling arrives with Stage B.
+        break;
+
+    case MSG_WIFI_ACQUIRE:
+        s_wifi_users++;
+        // Join only from BLE rest; if a sync/join/hold is already in flight, this just
+        // adds a reference and rides the existing connection.
+        if (s_state == NET_SYNC_IDLE && provisioning_has_creds())
+            begin_join(NET_STA_CONNECTING);     // s_sync_pending stays false -> feature hold
+        else if (s_state == NET_SYNC_IDLE)
+            ESP_LOGW(TAG, "wifi hold requested but no creds");
+        break;
+
+    case MSG_WIFI_RELEASE:
+        if (s_wifi_users > 0) s_wifi_users--;
+        if (s_wifi_users == 0 &&
+            (s_state == NET_STA_CONNECTED || s_state == NET_STA_CONNECTING)) {
+            provisioning_sta_disconnect();
+            enter_sync();                       // last holder gone -> back to BLE (§2.3)
+        }
         break;
     }
 }

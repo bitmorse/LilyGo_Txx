@@ -47,6 +47,14 @@ void netmgr_request_provision(const char *ssid, const char *pass);  // store + v
 void netmgr_request_forget_wifi(void);   // erase creds -> sync-idle (live, no reboot)
 void netmgr_request_set_mode(bool wlan); // pref: true=ext-wifi sync, false=hotspot sync
 
+// --- on-demand Wi-Fi (for internet features: ZRH traffic, radio) -------------
+// Hold Wi-Fi up while a feature needs it, then release. The device joins home Wi-Fi
+// (BLE stays up, §1.3) and drops it when the last holder releases -- so the device
+// still rests on BLE (§2.3). Reference-counted; call release() exactly once per
+// hold(), even if hold() returned false. hold() blocks up to timeout_ms for an IP.
+bool netmgr_wifi_hold(unsigned timeout_ms);
+void netmgr_wifi_release(void);
+
 // --- internal events, posted by the WiFi/IP event handler in provisioning.c ---
 typedef enum {
     NETEV_STA_GOT_IP,

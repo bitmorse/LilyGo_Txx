@@ -1,4 +1,5 @@
 #include "radio.h"
+#include "netmgr.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -57,7 +58,13 @@ static void radio_task(void *arg)
     dac_continuous_handle_t  dac = NULL;
     int inlen = 0;
 
+    bool wifi_held = false;
     if (!in || !pcm || !out || !dec) { ESP_LOGE(TAG, "no memory"); s_status = "Error"; goto done; }
+
+    // On-demand Wi-Fi: hold it up for the whole stream (BLE stays up, §1.3), released
+    // in the cleanup below when the user stops.
+    wifi_held = true;
+    if (!netmgr_wifi_hold(15000)) { ESP_LOGW(TAG, "no wifi"); s_status = "No WiFi"; goto done; }
 
     esp_http_client_config_t hc = {
         .url = STATION_URL, .timeout_ms = 8000, .buffer_size = 1024,
@@ -113,9 +120,11 @@ done:
     if (cli) { esp_http_client_close(cli); esp_http_client_cleanup(cli); }
     if (dec) MP3FreeDecoder(dec);
     free(in); free(pcm); free(out);
+    if (wifi_held) netmgr_wifi_release();          // drop the Wi-Fi hold (§2.3)
     ESP_LOGI(TAG, "stopped, free heap %u", (unsigned)esp_get_free_heap_size());
     s_run = false;
-    s_status = "Off";
+    // keep a failure status ("Error"/"No WiFi") visible; otherwise back to Off
+    if (s_status[0] == 'B' || s_status[0] == 'P') s_status = "Off";
     s_task = NULL;
     vTaskDelete(NULL);
 }

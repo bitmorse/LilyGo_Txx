@@ -155,10 +155,12 @@ code disagree, the code is a bug — fix the code, not the meaning.
 - **§5.4 verifying** — briefly joined to test creds, then back to §5.1 (§4.3).
 - **§5.5 sta-connecting / sta-connected** — **transient only**: entered on demand (a sync
   join, or a feature Wi-Fi hold), never a resting state. Returns to §5.1 when the use ends.
-> Implementation note: external Wi-Fi sync is now **ephemeral** (join → serve → leave;
-> netmgr Stage A). The device never rests on Wi-Fi. **Pending (Stage B):** the internet
-> features (ZRH Traffic, Radio) need an on-demand Wi-Fi *hold* (join while open, BLE stays
-> up per §1.3, leave on close) — until then they have no connectivity in the new model.
+> Implementation note: external Wi-Fi sync is **ephemeral** (join → serve → leave). The
+> device never rests on Wi-Fi. Internet features get Wi-Fi on demand via a ref-counted
+> **hold**: `netmgr_wifi_hold()` / `netmgr_wifi_release()` (ZRH Traffic holds for the
+> fetch, Radio for the stream); the last release drops Wi-Fi back to BLE (§2.3). BLE
+> stays up throughout the hold (§1.3). A sync is refused while the radio is playing
+> (both are heap-heavy, §1.1).
 
 ### §6 Words to avoid
 - ❌ "BLE is always on/available" → ✅ "BLE is up except during an active transfer (§3.2)".

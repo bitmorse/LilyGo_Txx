@@ -326,8 +326,11 @@ static void air_fetch_task(void *arg)
     int today[24], tdc[24], ttot = 0;
     int usual[24], udc[24], utot = 0;
 
-    int ok_t = airport_fetch_hourly(1, today, tdc, &ttot);
-    int ok_u = airport_fetch_hourly(14, usual, udc, &utot);
+    // On-demand Wi-Fi just for the fetch (BLE stays up, §1.3); released below.
+    bool wifi = netmgr_wifi_hold(15000);
+    int ok_t = wifi ? airport_fetch_hourly(1, today, tdc, &ttot) : -1;
+    int ok_u = wifi ? airport_fetch_hourly(14, usual, udc, &utot) : -1;
+    netmgr_wifi_release();
 
     // Usual = average movements per active day, per hour.
     int usual_avg[24];
