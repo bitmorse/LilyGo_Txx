@@ -20,6 +20,7 @@ idf_component_register(
         "viblog.c"
         "manifest.c"
         "manifest_filter.c"
+        "fileid.c"
         "filesrv.c"
         "apmode.c"
         "uartrx.c"

@@ -37,6 +37,9 @@ $CC $CFLAGS -o "$OUT/test_wifi_creds" test/test_wifi_creds.c main/wifi_creds.c
 $CC $CFLAGS -o "$OUT/test_manifest_filter" test/test_manifest_filter.c main/manifest_filter.c
 "$OUT/test_manifest_filter" || fail=1
 
+$CC $CFLAGS -o "$OUT/test_fileid" test/test_fileid.c main/fileid.c
+"$OUT/test_fileid" || fail=1
+
 echo
 echo "== integration: write a real MCAP with the production units =="
 $CC $CFLAGS -o "$OUT/integration_write" \

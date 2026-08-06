@@ -1,5 +1,6 @@
 #include "filesrv.h"
 #include "manifest.h"
+#include "fileid.h"
 #include "sdcard.h"
 #include "provisioning.h"
 #include "netmgr.h"
@@ -113,11 +114,9 @@ static void close_conn(httpd_req_t *req)
     httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
 }
 
-static int id_from_uri(const char *uri)   // ".../file/7" -> 7
-{
-    const char *slash = strrchr(uri, '/');
-    return slash ? atoi(slash + 1) : -1;
-}
+// ".../file/7" -> 7, or -1 if the trailing segment isn't all digits. Rejecting
+// non-numeric ids stops the wildcard route from mapping "DELETE /file/garbage" to id 0.
+static int id_from_uri(const char *uri) { return fileid_from_uri(uri); }
 
 // --- handlers ---------------------------------------------------------------
 
