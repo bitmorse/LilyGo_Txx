@@ -11,7 +11,7 @@
 
 typedef struct {
     bool     running;
-    char     path[40];      // /sdcard/vibNNNN.mcap
+    char     path[48];      // /sdcard/vib_YYYYmmdd_HHMMSS.mcap
     uint32_t rate_hz;       // nominal capture rate (4000)
     uint64_t samples;       // accel samples written to the file
     uint32_t drops;         // accel samples lost (FIFO overflow / buffer full)

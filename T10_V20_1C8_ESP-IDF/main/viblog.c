@@ -72,7 +72,7 @@ static volatile uint64_t s_written;   // writer: accel samples written to file
 static volatile uint64_t s_bytes;     // writer: bytes written
 static volatile uint32_t s_aux_drops; // aux sampler: aux samples lost
 
-static char s_path[40];
+static char s_path[48];   // "/sdcard/vib_YYYYmmdd_HHMMSS.mcap" + optional "-N"
 static char s_err[48];
 
 bool viblog_is_running(void) { return s_run; }
@@ -218,15 +218,6 @@ static void writer_task(void *arg)
 
 // --- start / stop -----------------------------------------------------------
 
-static bool next_path(char *out, int n)
-{
-    for (int i = 0; i < 10000; i++) {
-        snprintf(out, n, "/sdcard/vib%04d.mcap", i);
-        struct stat st;
-        if (stat(out, &st) != 0) return true;       // doesn't exist -> use it
-    }
-    return false;
-}
 
 bool viblog_start(void)
 {
@@ -249,7 +240,7 @@ bool viblog_start(void)
         imu_hires_stop();
         return false;
     }
-    if (!next_path(s_path, sizeof(s_path))) {
+    if (!sd_next_path("vib", s_path, sizeof(s_path))) {
         snprintf(s_err, sizeof(s_err), "card full of logs");
         goto fail;
     }

@@ -1,11 +1,16 @@
 #include "sdcard.h"
 
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
+#include <sys/stat.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
+#include "provisioning.h"        // time_is_synced()
 
 static const char *TAG = "sd";
 
@@ -93,4 +98,27 @@ uint64_t sd_free_bytes(void)
     uint64_t total = 0, avail = 0;
     if (esp_vfs_fat_info(MOUNT_POINT, &total, &avail) != ESP_OK) return 0;
     return avail;
+}
+
+bool sd_next_path(const char *prefix, char *out, int cap)
+{
+    char stamp[24];
+    if (time_is_synced()) {                         // UTC wall clock -> human timestamp
+        time_t now = time(NULL);
+        struct tm tm;
+        gmtime_r(&now, &tm);
+        strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tm);
+    } else {                                         // no clock yet -> monotonic uptime
+        snprintf(stamp, sizeof(stamp), "up%llu",
+                 (unsigned long long)(esp_timer_get_time() / 1000000));
+    }
+    // Find a free name -- the "-N" suffix covers same-second (or same-uptime) collisions,
+    // so a delete + re-record can never reuse a filename.
+    for (int i = 0; i < 100; i++) {
+        if (i == 0) snprintf(out, cap, MOUNT_POINT "/%s_%s.mcap", prefix, stamp);
+        else        snprintf(out, cap, MOUNT_POINT "/%s_%s-%d.mcap", prefix, stamp, i);
+        struct stat st;
+        if (stat(out, &st) != 0) return true;        // doesn't exist -> use it
+    }
+    return false;
 }

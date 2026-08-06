@@ -57,7 +57,7 @@ static portMUX_TYPE            s_ring_mux = portMUX_INITIALIZER_UNLOCKED;
 // MCAP recording (monitor-task-owned). /sdcard/uartNNNN.mcap; skipped if no SD.
 static FILE                   *s_fp;
 static mcap_writer_t           s_mcap;
-static char                    s_rec_path[40];
+static char                    s_rec_path[48];  // "/sdcard/uart_YYYYmmdd_HHMMSS.mcap" +"-N"
 static volatile uint64_t       s_rec_bytes;
 static bool                    s_rec_walltime;      // latched at rec_open (see rec_now_ns)
 
@@ -154,15 +154,6 @@ static void detach_uart(void)
 
 // --- MCAP recording (all on the monitor task; no-ops if SD/open failed) ------
 
-static bool next_path(char *out, int n)
-{
-    for (int i = 0; i < 10000; i++) {
-        snprintf(out, n, "/sdcard/uart%04d.mcap", i);
-        struct stat st;
-        if (stat(out, &st) != 0) return true;       // doesn't exist -> use it
-    }
-    return false;
-}
 
 static void rec_write_state(uartrx_state_t st)
 {
@@ -184,7 +175,7 @@ static void rec_open(void)
         return;
     }
     if (!sd_mount()) { ESP_LOGW(TAG, "no SD -> not recording"); return; }
-    if (!next_path(s_rec_path, sizeof(s_rec_path))) return;
+    if (!sd_next_path("uart", s_rec_path, sizeof(s_rec_path))) return;
     s_fp = fopen(s_rec_path, "wb");
     if (!s_fp) { ESP_LOGW(TAG, "rec open failed"); return; }
     setvbuf(s_fp, NULL, _IOFBF, 8 * 1024);         // fewer, larger SD writes

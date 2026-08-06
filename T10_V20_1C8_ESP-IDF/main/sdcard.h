@@ -19,3 +19,10 @@ bool sd_is_mounted(void);
 
 // Free space on the mounted card, in bytes (0 if not mounted / query failed).
 uint64_t sd_free_bytes(void);
+
+// Build a unique recording path "/sdcard/<prefix>_<stamp>.mcap": a UTC timestamp
+// (YYYYmmdd_HHMMSS) when the clock is set, else a monotonic uptime; a "-N" suffix is
+// appended if the name is taken. Timestamped (not incremental) so a delete + re-record
+// never reuses a just-synced filename. Returns false if no free name was found. `cap`
+// should be >= 48. The SD must be mounted.
+bool sd_next_path(const char *prefix, char *out, int cap);
