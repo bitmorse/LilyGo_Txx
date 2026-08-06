@@ -233,7 +233,10 @@ int manifest_stream_json(manifest_sink_fn sink, void *ctx)
     // was ~1.6 s/file on this SD card (25 s for a dozen files -> the app's 10 s timeout).
     // The app verifies integrity from the /file ETag (which the device sets from the
     // sidecar, one read at download time) instead. Keeps /manifest cheap + scalable.
+    int emitted = 0;
     for (int i = 0; i < n && rc == 0; i++) {
+        if (s_files[i].name[0] == '\0') continue;   // tombstoned (deleted this session)
+
         char iso[24];
         struct tm tmv;
         gmtime_r(&s_files[i].mtime, &tmv);
@@ -243,10 +246,11 @@ int manifest_stream_json(manifest_sink_fn sink, void *ctx)
         int m = snprintf(ent, sizeof(ent),
             "%s{\"id\":%d,\"name\":\"%s\",\"mime\":\"%s\",\"bytes\":%ld,"
             "\"created_at\":\"%s\"}",
-            i ? "," : "", i, s_files[i].name, mime_for(s_files[i].name),
+            emitted ? "," : "", i, s_files[i].name, mime_for(s_files[i].name),
             s_files[i].size, iso);
         if (m < 0 || m >= (int)sizeof(ent)) continue;   // never expected; skip entry
         rc = emit(sink, ctx, buf, sizeof(buf), &len, ent, m);
+        emitted++;
     }
 
     if (rc == 0) rc = emit(sink, ctx, buf, sizeof(buf), &len, "]}", 2);
@@ -259,7 +263,7 @@ bool manifest_path_for_id(int id, char *path, int cap)
 {
     lock();
     int n = scan(s_files, MAX_FILES);
-    bool ok = (id >= 0 && id < n);
+    bool ok = (id >= 0 && id < n && s_files[id].name[0] != '\0');
     if (ok) snprintf(path, cap, "%s/%s", MOUNT, s_files[id].name);
     unlock();
     return ok;
@@ -274,7 +278,7 @@ bool manifest_sha256_for_id(int id, char *hex64, int cap)
     char name[NAME_MAX_];
     lock();
     int n = scan(s_files, MAX_FILES);
-    bool ok = (id >= 0 && id < n);
+    bool ok = (id >= 0 && id < n && s_files[id].name[0] != '\0');
     if (ok) memcpy(name, s_files[id].name, NAME_MAX_);
     unlock();
     return ok && sha256_read_sidecar(name, hex64);
@@ -308,18 +312,18 @@ bool manifest_delete_id(int id)
     char path[300];
     lock();
     int n = scan(s_files, MAX_FILES);
-    bool ok = (id >= 0 && id < n);
+    bool ok = (id >= 0 && id < n && s_files[id].name[0] != '\0');
     if (ok) {
         snprintf(path, sizeof(path), "%s/%s", MOUNT, s_files[id].name);
         remove(path);
         snprintf(path, sizeof(path), "%s/%s.s256", MOUNT, s_files[id].name);
         remove(path);                                    // best-effort sidecar
         ESP_LOGI(TAG, "deleted id %d (%s)", id, s_files[id].name);
-        // Update the cached scan IN PLACE rather than invalidating it -- a re-scan of
-        // this slow SD (~6 s) would make the next delete time out. Drop the entry and
-        // shift the tail down; same id renumbering a fresh scan would produce.
-        memmove(&s_files[id], &s_files[id + 1], (size_t)(n - id - 1) * sizeof(entry_t));
-        s_scan_n = n - 1;
+        // Tombstone the cache slot (empty name) instead of shifting: ids of the other
+        // files stay stable for the whole session, so the app can batch-delete from a
+        // single /manifest. Re-scanning here would also be too slow (~6 s SD). The
+        // tombstones clear on the next fresh scan (new serving session).
+        s_files[id].name[0] = '\0';
     }
     unlock();
     return ok;
